@@ -10,7 +10,8 @@ fn main() {
 			let status = std::process::Command::new("deno")
 				.args([
 					"run",
-					"--lock=target/deno.lock",
+					"--frozen",
+					"--lock=../../deno.lock",
 					"--allow-all",
 					"build.ts",
 					fs::canonicalize(out_dir)?.to_string_lossy().as_ref(),
