@@ -11,7 +11,7 @@
 	import InstanceEditor from "./InstanceEditor.svelte";
 
 	import { t } from "$lib/i18n";
-	import { copiedItem, inspectedInstance, inspectedParentAction, openContextMenu } from "$lib/propertyInspector";
+	import { copiedItem, inspectedInstance, inspectedParentAction, openContextMenu, restoreSelectedAction, takeSelectedAction } from "$lib/propertyInspector";
 	import { CanvasLock, renderImage } from "$lib/rendererHelper";
 	import { settings } from "$lib/settings";
 
@@ -59,10 +59,32 @@
 		if (JSON.stringify(context) == JSON.stringify(payload.context)) pressed = payload.pressed;
 	});
 
-	function select(event: MouseEvent | KeyboardEvent) {
+	let assigning = false;
+	let suppressVirtualPressUntil = 0;
+
+	async function select(event: MouseEvent | KeyboardEvent) {
 		if (event instanceof MouseEvent && event.ctrlKey) return;
 		$openContextMenu = null;
 		if (!slot) {
+			const intent = context && handlePaste && !assigning ? takeSelectedAction() : null;
+			if (intent && context && handlePaste) {
+				assigning = true;
+				suppressVirtualPressUntil = Date.now() + 750;
+				try {
+					const pasted = await handlePaste({ type: "action", action: intent.action }, context);
+					if (pasted) {
+						await tick();
+						$inspectedInstance = `${context.device}.${context.profile}.${context.controller}.${context.position}.0`;
+						return;
+					}
+					restoreSelectedAction(intent);
+				} catch (error) {
+					restoreSelectedAction(intent);
+					console.error("Failed to assign action", error);
+				} finally {
+					assigning = false;
+				}
+			}
 			$inspectedInstance = context;
 			return;
 		}
@@ -110,11 +132,11 @@
 		copiedItem.set({ type: "instance", source: context });
 	}
 
-	export let handlePaste: ((item: CopiedItem, destination: Context) => Promise<void>) | undefined = undefined;
+	export let handlePaste: ((item: CopiedItem, destination: Context) => Promise<boolean>) | undefined = undefined;
 	async function paste() {
 		$openContextMenu = null;
 		if (!$copiedItem || !context || !handlePaste) return;
-		await handlePaste($copiedItem, context);
+		if (!(await handlePaste($copiedItem, context))) return;
 		await tick();
 		$inspectedInstance = `${context.device}.${context.profile}.${context.controller}.${context.position}.0`;
 	}
@@ -185,7 +207,7 @@
 	}
 
 	async function triggerVirtualPress() {
-		if (!active || !context || !slot) return;
+		if (Date.now() < suppressVirtualPressUntil || !active || !context || !slot) return;
 		await invoke("trigger_virtual_press", { context });
 	}
 

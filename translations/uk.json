@@ -1,5 +1,6 @@
 {
 	"action_list.hint": "Використовуйте клавіші зі стрілками для навігації між діями у категорії.",
+	"action_list.assign_hint": "Виберіть дію, а потім кнопку або регулятор. Також можна перетягувати.",
 	"action_list.search_placeholder": "Пошук дій",
 	"device_selector.choose_device": "Виберіть пристрій...",
 	"device_selector.device": "Пристрій",

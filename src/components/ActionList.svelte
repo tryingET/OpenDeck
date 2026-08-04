@@ -5,7 +5,7 @@
 
 	import { t } from "$lib/i18n";
 	import { getWebserverUrl } from "$lib/ports";
-	import { copiedItem } from "$lib/propertyInspector";
+	import { copiedItem, selectedAction, setSelectedAction } from "$lib/propertyInspector";
 	import { localisations } from "$lib/settings";
 	import { PRODUCT_NAME } from "$lib/singletons";
 
@@ -32,6 +32,15 @@
 				return [categoryName, { icon, actions }];
 			})
 			.filter(([_, { actions }]) => actions.length > 0);
+	}
+
+	function isSelected(action: Action) {
+		return $selectedAction?.plugin == action.plugin && $selectedAction.uuid == action.uuid;
+	}
+
+	function selectAction(action: Action) {
+		if (isSelected(action)) setSelectedAction(null);
+		else setSelectedAction(action);
 	}
 
 	function handleListKeydown(event: KeyboardEvent) {
@@ -82,6 +91,7 @@
 		<input bind:value={query} class="w-full p-1 text-sm text-neutral-300" placeholder={$t("action_list.search_placeholder")} type="search" spellcheck="false" />
 	</div>
 
+	<p class="px-3 pb-2 text-xs leading-4 text-neutral-400">{$t("action_list.assign_hint")}</p>
 	<span id="action-list-hint" class="sr-only">{$t("action_list.hint")}</span>
 	<div class="grow overflow-auto select-none divide-y divide-neutral-800!">
 		{#each filteredCategories as [name, { icon, actions }]}
@@ -102,21 +112,31 @@
 				</summary>
 				<div role="listbox" aria-label={name} aria-describedby="action-list-hint" tabindex="-1" on:keydown={handleListKeydown} on:focusin={handleListFocusin}>
 					{#each actions as action, i}
+						{@const selected = $selectedAction?.plugin == action.plugin && $selectedAction.uuid == action.uuid}
 						<div
 							class="flex flex-row items-center p-2 pl-6 bg-neutral-950 hover:bg-neutral-900 transition-colors border-t border-neutral-800 cursor-grab active:cursor-grabbing"
+							class:bg-blue-950={selected}
+							class:ring-1={selected}
+							class:ring-inset={selected}
+							class:ring-blue-500={selected}
 							draggable="true"
 							title={$localisations?.[action.plugin]?.[action.uuid]?.Tooltip ?? action.tooltip}
 							role="option"
-							aria-selected="false"
+							aria-selected={selected}
 							tabindex={i == 0 ? 0 : -1}
 							aria-label={$localisations?.[action.plugin]?.[action.uuid]?.Name ?? action.name}
+							on:click|stopPropagation={() => selectAction(action)}
 							on:dragstart={(event) => {
 								if (!event.dataTransfer) return;
+								setSelectedAction(null);
 								event.dataTransfer.effectAllowed = "copy";
 								event.dataTransfer.setData("action", JSON.stringify(action));
 							}}
 							on:keydown={(event) => {
-								if ((event.ctrlKey || event.metaKey) && event.key == "c") {
+								if (event.key == "Enter" || event.key == " ") {
+									event.preventDefault();
+									selectAction(action);
+								} else if ((event.ctrlKey || event.metaKey) && event.key == "c") {
 									copiedItem.set({ type: "action", action });
 								}
 							}}

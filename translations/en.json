@@ -1,5 +1,6 @@
 {
 	"action_list.hint": "Use arrow keys to navigate between actions within a category.",
+	"action_list.assign_hint": "Select an action, then select a button or dial. You can also drag and drop.",
 	"action_list.search_placeholder": "Search actions",
 	"device_selector.choose_device": "Choose a device...",
 	"device_selector.device": "Device",
