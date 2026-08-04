@@ -70,6 +70,10 @@ pub enum InboundEventType {
 	DeviceBrightness(misc::DeviceBrightnessEvent),
 }
 
+fn plugin_owns_device(uuid: &str, device_id: &str) -> bool {
+	crate::shared::DEVICES.get(device_id).is_some_and(|device| device.plugin == uuid)
+}
+
 pub async fn process_incoming_message(data: Result<Message, Error>, uuid: &str, skip_auth: bool) {
 	if let Ok(Message::Text(text)) = data {
 		let decoded: InboundEventType = match serde_json::from_str(&text) {
@@ -111,9 +115,19 @@ pub async fn process_incoming_message(data: Result<Message, Error>, uuid: &str, 
 				if event.context != uuid {
 					return;
 				}
+			} else if let Some(device_id) = match &decoded {
+				InboundEventType::DeregisterDevice(event) | InboundEventType::RerenderImages(event) => Some(event.payload.as_str()),
+				InboundEventType::KeyDown(event) | InboundEventType::KeyUp(event) | InboundEventType::EncoderDown(event) | InboundEventType::EncoderUp(event) => Some(event.payload.device.as_str()),
+				InboundEventType::EncoderChange(event) => Some(event.payload.device.as_str()),
+				InboundEventType::TouchscreenPress(event) => Some(event.payload.device.as_str()),
+				_ => None,
+			} {
+				if !plugin_owns_device(uuid, device_id) {
+					return;
+				}
 			} else if matches!(decoded, InboundEventType::SwitchProfile(_) | InboundEventType::DeviceBrightness(_))
 				&& uuid != "com.amansprojects.starterpack.sdPlugin"
-				&& uuid != "opendeck_alternative_elgato_implementation"
+				&& uuid != crate::plugins::ALTERNATIVE_ELGATO_PLUGIN_UUID
 			{
 				return;
 			}

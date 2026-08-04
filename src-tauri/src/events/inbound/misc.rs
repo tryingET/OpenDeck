@@ -10,6 +10,9 @@ pub struct OpenUrlEvent {
 }
 
 pub async fn open_url(event: PayloadEvent<OpenUrlEvent>) -> Result<(), anyhow::Error> {
+	if !crate::plugins::is_allowed_external_url(&event.payload.url) {
+		return Err(anyhow::anyhow!("refusing to open URL with unsafe or unsupported scheme"));
+	}
 	log::debug!("Opening URL {}", event.payload.url);
 	open::that_detached(event.payload.url)?;
 	Ok(())

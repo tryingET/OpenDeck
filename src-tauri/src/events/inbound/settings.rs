@@ -37,6 +37,9 @@ pub async fn set_global_settings(event: super::ContextAndPayloadEvent<serde_json
 	} else {
 		event.context.clone()
 	};
+	if !crate::plugins::is_safe_plugin_uuid(&uuid) {
+		return Err(anyhow::anyhow!("unsafe plugin id for global settings"));
+	}
 
 	{
 		let settings_dir = crate::shared::config_dir().join("settings");
@@ -64,6 +67,9 @@ pub async fn get_global_settings(event: super::ContextEvent<String>, from_proper
 	} else {
 		event.context.clone()
 	};
+	if !crate::plugins::is_safe_plugin_uuid(&uuid) {
+		return Err(anyhow::anyhow!("unsafe plugin id for global settings"));
+	}
 
 	outbound::did_receive_global_settings(&uuid, from_property_inspector).await
 }
