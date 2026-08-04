@@ -14,6 +14,11 @@ pub async fn make_info(plugin: String) -> Result<crate::plugins::info_param::Inf
 }
 
 #[command]
+pub async fn issue_registration(context: ActionContext, plugin: String) -> Result<String, Error> {
+	crate::events::issue_property_inspector_registration(&context.to_string(), &plugin).await.map_err(Into::into)
+}
+
+#[command]
 pub async fn switch_property_inspector(old: Option<ActionContext>, new: Option<ActionContext>) {
 	if let Some(context) = old {
 		let _ = crate::events::outbound::property_inspector::property_inspector_did_appear(context, "propertyInspectorDidDisappear").await;

@@ -28,6 +28,7 @@ streamdeck-strip-render = { git = "https://github.com/FrostyCoolSlug/streamdeck-
 # Smaller utility libraries
 dashmap = { version = "6.1", features = ["serde"] }
 futures = "0.3"
+getrandom = "0.3"
 anyhow = "1.0"
 log = "0.4"
 log-panics = "2.1"

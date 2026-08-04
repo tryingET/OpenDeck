@@ -8,7 +8,11 @@ use crate::shared::{CATEGORIES, Category, config_dir, convert_icon, is_flatpak, 
 
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
-use std::sync::{LazyLock, mpsc};
+use std::sync::{
+	Arc, LazyLock,
+	atomic::{AtomicU8, Ordering},
+	mpsc,
+};
 use std::{
 	fs,
 	path::{self, Path},
@@ -21,11 +25,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::{
 	handshake::server::{ErrorResponse, Request, Response},
 	http::{StatusCode, header::ORIGIN},
+	protocol::WebSocketConfig,
 };
 
 use anyhow::anyhow;
 use log::{error, warn};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore, oneshot};
 
 pub enum PluginChildType {
 	Wine,
@@ -42,8 +47,17 @@ enum PluginInstance {
 
 pub static DEVICE_NAMESPACES: LazyLock<RwLock<HashMap<String, String>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 static INSTANCES: LazyLock<Mutex<HashMap<String, PluginInstance>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PLUGIN_LIFECYCLE_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub async fn lock_plugin_lifecycle(uuid: &str) -> tokio::sync::OwnedMutexGuard<()> {
+	let lock = PLUGIN_LIFECYCLE_LOCKS.lock().await.entry(uuid.to_owned()).or_insert_with(|| Arc::new(Mutex::new(()))).clone();
+	lock.lock_owned().await
+}
 
 pub(crate) const ALTERNATIVE_ELGATO_PLUGIN_UUID: &str = "opendeck_alternative_elgato_implementation";
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_PENDING_WEBSOCKET_REGISTRATIONS: usize = 128;
+const CHILD_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(crate) fn is_safe_plugin_uuid(uuid: &str) -> bool {
 	!uuid.is_empty()
@@ -72,14 +86,27 @@ pub(crate) fn is_known_plugin_registration_uuid(uuid: &str) -> bool {
 	uuid == ALTERNATIVE_ELGATO_PLUGIN_UUID || is_installed_plugin_uuid(uuid)
 }
 
-fn websocket_origin_allowed(origin: Option<&str>, port_base: u16) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum WebSocketOrigin {
+	Native = 1,
+	PluginServer = 2,
+	SandboxedPropertyInspector = 3,
+}
+
+fn websocket_origin(origin: Option<&str>, port_base: u16) -> Option<WebSocketOrigin> {
 	match origin {
-		None => true,
+		None => Some(WebSocketOrigin::Native),
+		Some("null") => Some(WebSocketOrigin::SandboxedPropertyInspector),
 		Some(origin) => {
 			let webserver_port = port_base + 2;
-			origin == format!("http://localhost:{webserver_port}") || origin == format!("http://127.0.0.1:{webserver_port}")
+			(origin == format!("http://localhost:{webserver_port}") || origin == format!("http://127.0.0.1:{webserver_port}")).then_some(WebSocketOrigin::PluginServer)
 		}
 	}
+}
+
+fn websocket_origin_allowed(origin: Option<&str>, port_base: u16) -> bool {
+	websocket_origin(origin, port_base).is_some()
 }
 
 pub(crate) fn is_allowed_external_url(url: &str) -> bool {
@@ -115,7 +142,37 @@ fn attach_parent_death_signal(command: &mut Command) {
 	}
 }
 
-pub type SpawnRequest = Box<dyn FnOnce() -> Result<(String, PluginChildType, Command), anyhow::Error> + Send>;
+async fn stop_child(mut child: Child) -> Result<(), anyhow::Error> {
+	let stop = tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+		if child.try_wait()?.is_none() {
+			child.kill()?;
+		}
+		let _ = child.wait()?;
+		Ok(())
+	});
+	match tokio::time::timeout(CHILD_STOP_TIMEOUT, stop).await {
+		Ok(Ok(result)) => result.map_err(Into::into),
+		Ok(Err(error)) => Err(anyhow!("plugin stop task failed: {error}")),
+		Err(_) => Err(anyhow!("plugin process did not stop within {} seconds", CHILD_STOP_TIMEOUT.as_secs())),
+	}
+}
+
+type SpawnFactory = Box<dyn FnOnce() -> Result<(String, PluginChildType, Command), anyhow::Error> + Send>;
+
+pub struct SpawnRequest {
+	factory: SpawnFactory,
+	completion: oneshot::Sender<Result<(), String>>,
+}
+
+async fn request_spawn(spawner_tx: &mpsc::Sender<SpawnRequest>, factory: SpawnFactory) -> anyhow::Result<()> {
+	let (completion, result) = oneshot::channel();
+	spawner_tx.send(SpawnRequest { factory, completion }).map_err(|error| anyhow!(error.to_string()))?;
+	match result.await {
+		Ok(Ok(())) => Ok(()),
+		Ok(Err(error)) => Err(anyhow!(error)),
+		Err(error) => Err(anyhow!("plugin spawner dropped its response: {error}")),
+	}
+}
 
 /// Initialise a plugin from a given directory.
 pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<SpawnRequest>) -> anyhow::Result<()> {
@@ -126,6 +183,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 		.to_owned();
 	if !is_safe_plugin_uuid(&plugin_uuid) {
 		return Err(anyhow!("unsafe plugin directory name: {plugin_uuid}"));
+	}
+	if INSTANCES.lock().await.contains_key(&plugin_uuid) {
+		return Err(anyhow!("plugin {plugin_uuid} is already running"));
 	}
 	let supplied_path = path.canonicalize()?;
 	let path = canonical_installed_plugin_path(&plugin_uuid).ok_or_else(|| anyhow!("plugin directory is outside the canonical plugin root: {plugin_uuid}"))?;
@@ -317,8 +377,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 		let info = info_param::make_info(plugin_uuid.to_owned(), manifest.version, true).await;
 		let log_file = fs::File::create(log_dir().join("plugins").join(format!("{plugin_uuid}.log")))?;
 
-		spawner_tx
-			.send(Box::new(move || {
+		request_spawn(
+			&spawner_tx,
+			Box::new(move || {
 				let mut command = Command::new(command);
 				command
 					.current_dir(path)
@@ -336,8 +397,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 					command.creation_flags(0x08000000);
 				}
 				Ok((plugin_uuid, PluginChildType::Node, command))
-			}))
-			.map_err(|e| anyhow!(e.to_string()))?;
+			}),
+		)
+		.await?;
 	} else if use_wine {
 		let command = if is_flatpak() { "flatpak-spawn" } else { "wine" };
 		let extra_args = if is_flatpak() { vec!["--host", "wine"] } else { vec![] };
@@ -356,8 +418,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 		let info = info_param::make_info(plugin_uuid.to_owned(), manifest.version, true).await;
 		let log_file = fs::File::create(log_dir().join("plugins").join(format!("{plugin_uuid}.log")))?;
 
-		spawner_tx
-			.send(Box::new(move || {
+		request_spawn(
+			&spawner_tx,
+			Box::new(move || {
 				let mut command = Command::new(command);
 				command
 					.current_dir(&path)
@@ -375,8 +438,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 				#[cfg(target_os = "linux")]
 				attach_parent_death_signal(&mut command);
 				Ok((plugin_uuid, PluginChildType::Wine, command))
-			}))
-			.map_err(|e| anyhow!(e.to_string()))?;
+			}),
+		)
+		.await?;
 	} else {
 		let info = info_param::make_info(plugin_uuid.to_owned(), manifest.version, false).await;
 		let log_file = fs::File::create(log_dir().join("plugins").join(format!("{plugin_uuid}.log")))?;
@@ -387,8 +451,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 			fs::set_permissions(path.join(&code_path), fs::Permissions::from_mode(0o755))?;
 		}
 
-		spawner_tx
-			.send(Box::new(move || {
+		request_spawn(
+			&spawner_tx,
+			Box::new(move || {
 				let mut command = Command::new(path.join(code_path));
 				command
 					.current_dir(path)
@@ -404,8 +469,9 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 					command.creation_flags(0x08000000);
 				}
 				Ok((plugin_uuid, PluginChildType::Native, command))
-			}))
-			.map_err(|e| anyhow!(e.to_string()))?;
+			}),
+		)
+		.await?;
 	}
 
 	if let Some(applications) = manifest.applications_to_monitor
@@ -418,39 +484,44 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 }
 
 pub async fn deactivate_plugin(app: &AppHandle, uuid: &str) -> Result<(), anyhow::Error> {
-	crate::events::disconnect_plugin(uuid).await;
-	{
-		let mut namespaces = DEVICE_NAMESPACES.write().await;
-		if let Some((namespace, _)) = namespaces.clone().iter().find(|(_, plugin)| uuid == **plugin) {
-			namespaces.remove(namespace);
-			drop(namespaces);
-			let devices = crate::shared::DEVICES.iter().map(|v| v.key().to_owned()).filter(|id| &id[..2] == namespace).collect::<Vec<_>>();
-			for device in devices {
-				crate::events::inbound::devices::deregister_device("", crate::events::inbound::PayloadEvent { payload: device }).await?;
+	let deactivation = crate::events::begin_plugin_deactivation(uuid).await;
+	let result = async {
+		crate::events::disconnect_plugin(uuid).await;
+		{
+			let mut namespaces = DEVICE_NAMESPACES.write().await;
+			if let Some((namespace, _)) = namespaces.clone().iter().find(|(_, plugin)| uuid == **plugin) {
+				namespaces.remove(namespace);
+				drop(namespaces);
+				let devices = crate::shared::DEVICES.iter().map(|v| v.key().to_owned()).filter(|id| &id[..2] == namespace).collect::<Vec<_>>();
+				for device in devices {
+					crate::events::inbound::devices::deregister_device("", crate::events::inbound::PayloadEvent { payload: device }).await?;
+				}
+				crate::events::frontend::update_devices().await;
 			}
-			crate::events::frontend::update_devices().await;
 		}
-	}
 
-	crate::application_watcher::stop_monitoring(uuid).await;
+		crate::application_watcher::stop_monitoring(uuid).await;
 
-	if let Some(instance) = INSTANCES.lock().await.remove(uuid) {
-		match instance {
-			PluginInstance::Webview => {
-				if let Some(window) = app.get_webview_window(&uuid.replace('.', "_")) {
-					window.close()?;
-					tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		if let Some(instance) = INSTANCES.lock().await.remove(uuid) {
+			match instance {
+				PluginInstance::Webview => {
+					if let Some(window) = app.get_webview_window(&uuid.replace('.', "_")) {
+						window.close()?;
+						tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+					}
+				}
+				PluginInstance::Node(child) | PluginInstance::Wine(child) | PluginInstance::Native(child) => {
+					stop_child(child).await?;
 				}
 			}
-			PluginInstance::Node(mut child) | PluginInstance::Wine(mut child) | PluginInstance::Native(mut child) => {
-				child.kill()?;
-				child.wait()?;
-			}
+			Ok(())
+		} else {
+			Err(anyhow!("instance of plugin {} not found", uuid))
 		}
-		Ok(())
-	} else {
-		Err(anyhow!("instance of plugin {} not found", uuid))
 	}
+	.await;
+	deactivation.release().await;
+	result
 }
 
 #[cfg(windows)]
@@ -518,23 +589,34 @@ pub fn initialise_plugins() {
 
 	// Use a dedicated spawner thread so that plugin processes don't die due to PR_SET_PDEATHSIG when the parent Tokio worker exits
 	std::thread::spawn(|| {
-		for f in rx {
-			match f() {
-				Ok((plugin_uuid, child_type, mut command)) => match command.spawn() {
-					Ok(child) => {
-						INSTANCES.blocking_lock().insert(
-							plugin_uuid,
-							match child_type {
-								PluginChildType::Wine => PluginInstance::Wine(child),
-								PluginChildType::Native => PluginInstance::Native(child),
-								PluginChildType::Node => PluginInstance::Node(child),
-							},
-						);
-					}
-					Err(error) => warn!("Failed to initialise plugin {}: {}", plugin_uuid, error),
-				},
-				Err(error) => warn!("Failed to initialise plugin: {}", error),
+		for request in rx {
+			let result = (|| -> Result<(), anyhow::Error> {
+				let (plugin_uuid, child_type, mut command) = (request.factory)()?;
+				if INSTANCES.blocking_lock().contains_key(&plugin_uuid) {
+					return Err(anyhow!("plugin {plugin_uuid} is already running"));
+				}
+				let mut child = command.spawn()?;
+				let mut instances = INSTANCES.blocking_lock();
+				if instances.contains_key(&plugin_uuid) {
+					let _ = child.kill();
+					let _ = child.wait();
+					return Err(anyhow!("plugin {plugin_uuid} became active while its process was starting"));
+				}
+				instances.insert(
+					plugin_uuid,
+					match child_type {
+						PluginChildType::Wine => PluginInstance::Wine(child),
+						PluginChildType::Native => PluginInstance::Native(child),
+						PluginChildType::Node => PluginInstance::Node(child),
+					},
+				);
+				Ok(())
+			})()
+			.map_err(|error| format!("{error:#}"));
+			if let Err(error) = &result {
+				warn!("Failed to initialise plugin: {error}");
 			}
+			let _ = request.completion.send(result);
 		}
 	});
 
@@ -549,6 +631,10 @@ pub fn initialise_plugins() {
 			if metadata.is_dir() {
 				let spawner_tx = tx.clone();
 				tokio::spawn(async move {
+					let Some(plugin_uuid) = path.file_name().and_then(|name| name.to_str()).map(str::to_owned) else {
+						return;
+					};
+					let _lifecycle = lock_plugin_lifecycle(&plugin_uuid).await;
 					if let Err(error) = initialise_plugin(path.clone(), spawner_tx).await {
 						warn!("Failed to initialise plugin at {}: {:#}", path.display(), error);
 					}
@@ -595,50 +681,81 @@ async fn init_websocket_server() {
 		unsafe { SetHandleInformation(listener.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) };
 	}
 
+	let registration_slots = Arc::new(Semaphore::new(MAX_PENDING_WEBSOCKET_REGISTRATIONS));
+
 	while let Ok((stream, _)) = listener.accept().await {
+		let Ok(registration_slot) = Arc::clone(&registration_slots).try_acquire_owned() else {
+			warn!("Rejected WebSocket connection because the registration limit was reached");
+			continue;
+		};
 		tokio::spawn(async move {
-			if tokio::time::timeout(std::time::Duration::from_secs(10), accept_connection(stream)).await.is_err() {
-				warn!("Rejected WebSocket connection that did not register within 10 seconds");
+			let _registration_slot = registration_slot;
+			match tokio::time::timeout(std::time::Duration::from_secs(10), read_registration(stream)).await {
+				Ok(Some((event, socket))) => crate::events::register_plugin(event, socket).await,
+				Ok(None) => {}
+				Err(_) => warn!("Rejected WebSocket connection that did not register within 10 seconds"),
 			}
 		});
 	}
 }
 
-/// Handle incoming data from a WebSocket connection.
-async fn accept_connection(stream: TcpStream) {
-	let mut socket = match tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
-		let origin_allowed = match request.headers().get(ORIGIN) {
-			None => websocket_origin_allowed(None, *PORT_BASE),
-			Some(origin) => origin.to_str().ok().is_some_and(|origin| websocket_origin_allowed(Some(origin), *PORT_BASE)),
-		};
-		if origin_allowed {
-			Ok(response)
-		} else {
-			let mut response = ErrorResponse::new(Some("WebSocket origin is not allowed".to_owned()));
-			*response.status_mut() = StatusCode::FORBIDDEN;
-			Err(response)
-		}
-	})
+/// Complete the WebSocket handshake and read the registration event without mutating session state.
+#[allow(clippy::result_large_err)]
+async fn read_registration(stream: TcpStream) -> Option<(crate::events::inbound::RegisterEvent, tokio_tungstenite::WebSocketStream<TcpStream>)> {
+	let config = WebSocketConfig::default()
+		.max_message_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
+		.max_frame_size(Some(MAX_WEBSOCKET_MESSAGE_BYTES))
+		.max_write_buffer_size(MAX_WEBSOCKET_MESSAGE_BYTES * 2);
+	let observed_origin = Arc::new(AtomicU8::new(0));
+	let callback_origin = Arc::clone(&observed_origin);
+	let mut socket = match tokio_tungstenite::accept_hdr_async_with_config(
+		stream,
+		move |request: &Request, response: Response| {
+			let origin = request.headers().get(ORIGIN).and_then(|origin| origin.to_str().ok());
+			if let Some(origin) = websocket_origin(origin, *PORT_BASE) {
+				callback_origin.store(origin as u8, Ordering::Relaxed);
+				Ok(response)
+			} else {
+				let mut response = ErrorResponse::new(Some("WebSocket origin is not allowed".to_owned()));
+				*response.status_mut() = StatusCode::FORBIDDEN;
+				Err(response)
+			}
+		},
+		Some(config),
+	)
 	.await
 	{
 		Ok(socket) => socket,
 		Err(error) => {
 			warn!("Failed to complete WebSocket handshake: {}", error);
-			return;
+			return None;
 		}
 	};
 
 	let Some(Ok(register_event)) = socket.next().await else {
-		return;
+		return None;
 	};
 	let Ok(register_event) = register_event.into_text() else {
 		warn!("Rejected WebSocket connection without a text registration event");
-		return;
+		return None;
 	};
-	match serde_json::from_str(register_event.as_ref()) {
-		Ok(event) => crate::events::register_plugin(event, socket).await,
-		Err(error) => warn!("Rejected WebSocket connection with invalid registration event: {error}"),
+	let event: crate::events::inbound::RegisterEvent = match serde_json::from_str(register_event.as_ref()) {
+		Ok(event) => event,
+		Err(error) => {
+			warn!("Rejected WebSocket connection with invalid registration event: {error}");
+			return None;
+		}
+	};
+	let sandboxed_property_inspector = observed_origin.load(Ordering::Relaxed) == WebSocketOrigin::SandboxedPropertyInspector as u8;
+	let origin_matches_registration = match &event {
+		crate::events::inbound::RegisterEvent::RegisterPlugin { .. } => !sandboxed_property_inspector,
+		crate::events::inbound::RegisterEvent::RegisterPropertyInspector { .. } => sandboxed_property_inspector,
+	};
+	if !origin_matches_registration {
+		warn!("Rejected WebSocket registration from an origin that does not match its session type");
+		return None;
 	}
+	Some((event, socket))
 }
 
 #[cfg(test)]
@@ -660,6 +777,7 @@ mod tests {
 		assert!(websocket_origin_allowed(None, 57116));
 		assert!(websocket_origin_allowed(Some("http://localhost:57118"), 57116));
 		assert!(websocket_origin_allowed(Some("http://127.0.0.1:57118"), 57116));
+		assert!(websocket_origin_allowed(Some("null"), 57116));
 		assert!(!websocket_origin_allowed(Some("https://attacker.invalid"), 57116));
 		assert!(!websocket_origin_allowed(Some("http://localhost.attacker.invalid:57118"), 57116));
 	}

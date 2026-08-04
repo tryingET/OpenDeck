@@ -11,6 +11,7 @@
 	import { listen } from "@tauri-apps/api/event";
 
 	let iframes: { [context: string]: HTMLIFrameElement } = {};
+	let iframeLoadGenerations: { [context: string]: number } = {};
 	let iframeContainer: HTMLDivElement;
 	let iframeClosePopup: HTMLButtonElement;
 	let iframePopupsOpen: string[] = [];
@@ -19,7 +20,10 @@
 	export let profile: Profile;
 
 	async function iframeOnLoad(event: Event, instance: ActionInstance) {
-		const iframe = iframes[instance.context] ?? event.target;
+		const iframe = event.target instanceof HTMLIFrameElement ? event.target : null;
+		if (!iframe || iframes[instance.context] !== iframe || !iframe.src.startsWith(getWebserverUrl())) return;
+		const generation = (iframeLoadGenerations[instance.context] ?? 0) + 1;
+		iframeLoadGenerations[instance.context] = generation;
 		const split = instance.context.split(".");
 
 		const position = parseInt(split[3]);
@@ -30,10 +34,15 @@
 			coordinates = { row: Math.floor(position / device.columns), column: position % device.columns };
 		}
 
-		if (instance == null || !iframe?.src || !iframe.src.startsWith(getWebserverUrl())) return;
 		const info = JSON.stringify(await invoke("make_info", { plugin: instance.action.plugin }));
+		if (iframeLoadGenerations[instance.context] !== generation || iframes[instance.context] !== iframe) return;
+		const registrationToken = await invoke<string>("issue_registration", {
+			context: instance.context,
+			plugin: instance.action.plugin,
+		});
+		if (iframeLoadGenerations[instance.context] !== generation || iframes[instance.context] !== iframe) return;
 
-		iframe?.contentWindow?.postMessage(
+		iframe.contentWindow?.postMessage(
 			{
 				event: "connect",
 				payload: [
@@ -53,9 +62,10 @@
 							isInMultiAction: parseInt(split[4]) != 0,
 						},
 					}),
+					registrationToken,
 				],
 			},
-			getWebserverUrl(),
+			"*",
 		);
 	}
 
@@ -68,7 +78,7 @@
 			iframe.style.width = "100%";
 			iframe.style.height = "100%";
 			iframe.style.display = $inspectedInstance == context ? "block" : "none";
-			iframe.contentWindow?.postMessage({ event: "windowClosed" }, getWebserverUrl());
+			iframe.contentWindow?.postMessage({ event: "windowClosed" }, "*");
 		}
 
 		iframePopupsOpen = iframePopupsOpen.filter((e) => e != context);
@@ -85,9 +95,8 @@
 		}
 	};
 
-	const pluginServerOrigin = new URL(getWebserverUrl()).origin;
 	window.addEventListener("message", (event: MessageEvent) => {
-		if (event.origin !== pluginServerOrigin || !event.source) return;
+		if (event.origin !== "null" || !event.source) return;
 		const trustedIframe = Object.entries(iframes).find(([, iframe]) => iframe?.contentWindow === event.source);
 		if (!trustedIframe) return;
 
@@ -161,11 +170,11 @@
 								},
 							},
 						},
-						getWebserverUrl(),
+						"*",
 					);
 				})
 				.catch((error: any) => {
-					iframe.contentWindow?.postMessage({ event: "fetchError", payload: { id: requestId, error } }, getWebserverUrl());
+					iframe.contentWindow?.postMessage({ event: "fetchError", payload: { id: requestId, error } }, "*");
 				});
 		}
 	});
@@ -180,6 +189,7 @@
 	listen("plugin_reloaded", ({ payload }: { payload: string }) => {
 		for (const instance of instances) {
 			if (instance.action.plugin == payload && iframes[instance.context]) {
+				iframeLoadGenerations[instance.context] = (iframeLoadGenerations[instance.context] ?? 0) + 1;
 				iframes[instance.context].src += "";
 				if ($inspectedInstance == instance.context) {
 					invoke("switch_property_inspector", { new: instance.context });
@@ -209,6 +219,7 @@
 		{#if instance.action.property_inspector}
 			<iframe
 				title={$t("property_inspector.title")}
+				sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads"
 				class="w-full h-full hidden"
 				class:block!={$inspectedInstance == instance.context}
 				src={getWebserverUrl(instance.action.property_inspector + "|opendeck_property_inspector")}

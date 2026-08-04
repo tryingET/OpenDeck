@@ -22,6 +22,14 @@ fn asset_origin_allowed(origin: &str, port_base: u16) -> bool {
 		|| cfg!(debug_assertions) && origin == "http://localhost:5173"
 }
 
+fn property_inspector_parent_origins(include_development: bool) -> String {
+	let mut origins = vec!["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"];
+	if include_development {
+		origins.push("http://localhost:5173");
+	}
+	serde_json::to_string(&origins).expect("static property inspector origins must serialize")
+}
+
 /// Start a simple webserver to serve files of plugins that run in a browser environment.
 pub async fn init_webserver(prefix: PathBuf) {
 	let Ok(prefix) = prefix.canonicalize() else {
@@ -93,21 +101,62 @@ pub async fn init_webserver(prefix: PathBuf) {
 
 		if is_property_inspector {
 			let mut content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+			let parent_origins = property_inspector_parent_origins(cfg!(debug_assertions));
 			content += r#"
 				<div id="opendeck_iframe_container" style="position: absolute; z-index: 100; top: 0; left: 0; width: 100%; height: 100%; display: none;"></div>
 				<script>
 					const opendeck_window_open = window.open;
 					const opendeck_iframe_container = document.getElementById("opendeck_iframe_container");
-					const opendeck_parent_origins = new Set(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://localhost:5173"]);
+					const opendeck_parent_origins = new Set("#;
+			content += &parent_origins;
+			content += r#");
+
+					const opendeck_native_websocket = window.WebSocket;
+					const opendeck_socket_registrations = new WeakMap();
+					const opendeck_native_websocket_send = opendeck_native_websocket.prototype.send;
+					let opendeck_next_registration = null;
+					window.WebSocket = new Proxy(opendeck_native_websocket, {
+						construct(target, args, newTarget) {
+							const socket = Reflect.construct(target, args, newTarget);
+							if (opendeck_next_registration) {
+								opendeck_socket_registrations.set(socket, opendeck_next_registration);
+								opendeck_next_registration = null;
+							}
+							return socket;
+						}
+					});
+					opendeck_native_websocket.prototype.send = function(message) {
+						const registration = opendeck_socket_registrations.get(this);
+						if (registration && typeof message === "string") {
+							try {
+								const event = JSON.parse(message);
+								if (event.event === "registerPropertyInspector" && event.uuid === registration.uuid) {
+									event.token = registration.token;
+									message = JSON.stringify(event);
+									opendeck_socket_registrations.delete(this);
+								}
+							} catch (_) {}
+						}
+						return opendeck_native_websocket_send.call(this, message);
+					};
 
 					window.addEventListener("message", (event) => {
 						if (event.source !== window.parent || !opendeck_parent_origins.has(event.origin)) return;
 						const data = event.data;
 						if (!data || typeof data !== "object") return;
-						if (data.event == "connect") {
+						if (data.event == "connect" && Array.isArray(data.payload) && data.payload.length === 6) {
+							const [port, uuid, registrationEvent, info, actionInfo, token] = data.payload;
+							if (!Number.isInteger(port) || typeof uuid !== "string" || registrationEvent !== "registerPropertyInspector"
+								|| typeof info !== "string" || typeof actionInfo !== "string" || !/^[0-9a-f]{64}$/.test(token)) return;
 							event.stopImmediatePropagation();
-							if (typeof connectOpenActionSocket === "function") connectOpenActionSocket(...data.payload);
-							else connectElgatoStreamDeckSocket(...data.payload);
+							const registration = { uuid, token };
+							opendeck_next_registration = registration;
+							try {
+								if (typeof connectOpenActionSocket === "function") connectOpenActionSocket(port, uuid, registrationEvent, info, actionInfo);
+								else if (typeof connectElgatoStreamDeckSocket === "function") connectElgatoStreamDeckSocket(port, uuid, registrationEvent, info, actionInfo);
+							} finally {
+								if (opendeck_next_registration === registration) opendeck_next_registration = null;
+							}
 						} else if (data.event == "windowClosed") {
 							event.stopImmediatePropagation();
 							if (opendeck_iframe_container.firstElementChild) opendeck_iframe_container.firstElementChild.remove();
@@ -224,7 +273,7 @@ pub async fn init_webserver(prefix: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-	use super::asset_origin_allowed;
+	use super::{asset_origin_allowed, property_inspector_parent_origins};
 
 	#[test]
 	fn cors_allows_only_application_and_plugin_server_origins() {
@@ -233,5 +282,16 @@ mod tests {
 		assert!(asset_origin_allowed("http://localhost:57118", 57116));
 		assert!(!asset_origin_allowed("https://attacker.invalid", 57116));
 		assert!(!asset_origin_allowed("http://localhost.attacker.invalid:57118", 57116));
+	}
+
+	#[test]
+	fn release_parent_origins_exclude_development_server() {
+		let release = property_inspector_parent_origins(false);
+		let debug = property_inspector_parent_origins(true);
+		assert!(!release.contains("http://localhost:5173"));
+		assert!(debug.contains("http://localhost:5173"));
+		for origin in ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] {
+			assert!(release.contains(origin));
+		}
 	}
 }

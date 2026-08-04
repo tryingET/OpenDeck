@@ -24,7 +24,7 @@ pub async fn did_receive_settings(instance: &crate::shared::ActionInstance, to_p
 		payload: GenericInstancePayload::new(instance),
 	};
 	if to_property_inspector {
-		send_to_property_inspector(&instance.context, &data).await
+		send_to_property_inspector(&instance.context, &instance.action.plugin, &data).await
 	} else {
 		send_to_plugin(&instance.action.plugin, &data).await
 	}
@@ -41,12 +41,12 @@ struct DidReceiveGlobalSettingsEvent {
 	payload: DidReceiveGlobalSettingsPayload,
 }
 
-pub async fn did_receive_global_settings(context: &str, to_property_inspector: bool) -> Result<(), anyhow::Error> {
-	if !crate::plugins::is_safe_plugin_uuid(context) {
+pub async fn did_receive_global_settings(plugin: &str, to_property_inspector: bool) -> Result<(), anyhow::Error> {
+	if !crate::plugins::is_safe_plugin_uuid(plugin) {
 		return Err(anyhow::anyhow!("unsafe plugin id for global settings"));
 	}
 	let settings_dir = crate::shared::config_dir().join("settings");
-	let path = settings_dir.join(format!("{}.json", context));
+	let path = settings_dir.join(format!("{}.json", plugin));
 	let settings: serde_json::Value = match std::fs::File::open(&path) {
 		Ok(mut file) => {
 			file.lock_shared()?;
@@ -68,11 +68,11 @@ pub async fn did_receive_global_settings(context: &str, to_property_inspector: b
 
 	if to_property_inspector {
 		let profile_stores = crate::store::profiles::PROFILE_STORES.read().await;
-		for context in profile_stores.all_from_plugin(context) {
-			send_to_property_inspector(&context, &data).await?;
+		for context in profile_stores.all_from_plugin(plugin) {
+			send_to_property_inspector(&context, plugin, &data).await?;
 		}
 	} else {
-		send_to_plugin(context, &data).await?;
+		send_to_plugin(plugin, &data).await?;
 	}
 
 	Ok(())
