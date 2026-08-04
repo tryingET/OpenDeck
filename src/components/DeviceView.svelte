@@ -67,21 +67,23 @@
 		}
 	}
 
-	async function handlePaste(item: CopiedItem, destination: Context) {
+	async function handlePaste(item: CopiedItem, destination: Context): Promise<boolean> {
 		let array = destination.controller == "Encoder" ? profile.sliders : destination.controller == "Infobar" ? profile.infobars : profile.keys;
 
 		if (item.type == "action") {
-			if (array[destination.position]) return;
-			array[destination.position] = await invoke("create_instance", { context: destination, action: item.action });
-			profile = profile;
-			return;
-		}
-
-		let response: ActionInstance = await invoke("move_instance", { source: item.source, destination, retain: true });
-		if (response) {
+			if (array[destination.position]) return false;
+			const response: ActionInstance | null = await invoke("create_instance", { context: destination, action: item.action });
+			if (!response) return false;
 			array[destination.position] = response;
 			profile = profile;
+			return true;
 		}
+
+		const response: ActionInstance | null = await invoke("move_instance", { source: item.source, destination, retain: true });
+		if (!response) return false;
+		array[destination.position] = response;
+		profile = profile;
+		return true;
 	}
 
 	$: overflowsX = !usesSoomfonPhysicalLayout && Math.max(device.columns, device.encoders, device.touchpoints) > 8;

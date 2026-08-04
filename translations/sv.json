@@ -1,5 +1,6 @@
 {
 	"action_list.hint": "Använd piltangenterna för att navigera mellan åtgärder inom en kategori.",
+	"action_list.assign_hint": "Välj en åtgärd och välj sedan en knapp eller ratt. Du kan också dra och släppa.",
 	"action_list.search_placeholder": "Sök åtgärder",
 	"device_selector.choose_device": "Välj en enhet...",
 	"device_selector.device": "Enhet",

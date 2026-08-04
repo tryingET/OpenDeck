@@ -1,5 +1,6 @@
 {
 	"action_list.hint": "Use as setas para navegar entre as ações de uma categoria.",
+	"action_list.assign_hint": "Selecione uma ação e depois um botão ou seletor. Você também pode arrastar e soltar.",
 	"action_list.search_placeholder": "Procurar ações",
 	"device_selector.choose_device": "Escolher um dispositivo...",
 	"device_selector.device": "Dispositivo",

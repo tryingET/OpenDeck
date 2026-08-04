@@ -1,5 +1,6 @@
 {
 	"action_list.hint": "Verwende die Pfeiltasten, um zwischen Aktionen innerhalb einer Kategorie zu navigieren.",
+	"action_list.assign_hint": "Wähle eine Aktion und anschließend eine Taste oder einen Drehregler. Drag-and-drop funktioniert ebenfalls.",
 	"action_list.search_placeholder": "Durchsuche Aktionen",
 	"device_selector.choose_device": "Wähle ein Gerät...",
 	"device_selector.device": "Gerät",
