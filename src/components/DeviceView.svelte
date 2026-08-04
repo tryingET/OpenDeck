@@ -17,6 +17,15 @@
 
 	export let selectedDevice: string;
 
+	const AKP03_PLUGIN_ID = "st.lynx.plugins.opendeck-akp03.sdPlugin";
+	$: usesSoomfonPhysicalLayout =
+		device.plugin == AKP03_PLUGIN_ID &&
+		device.name == "Soomfon Stream Controller SE" &&
+		device.rows == 3 &&
+		device.columns == 3 &&
+		device.encoders == 3 &&
+		device.touchpoints == 0;
+
 	function handleDragStart({ dataTransfer }: DragEvent, controller: string, position: number) {
 		if (!dataTransfer) return;
 		dataTransfer.effectAllowed = "move";
@@ -75,8 +84,8 @@
 		}
 	}
 
-	$: overflowsX = Math.max(device.columns, device.encoders, device.touchpoints) > 8;
-	$: overflowsY = device.rows + Math.min(device.encoders, 1) + Math.min(device.touchpoints, 1) > 4;
+	$: overflowsX = !usesSoomfonPhysicalLayout && Math.max(device.columns, device.encoders, device.touchpoints) > 8;
+	$: overflowsY = !usesSoomfonPhysicalLayout && device.rows + Math.min(device.encoders, 1) + Math.min(device.touchpoints, 1) > 4;
 
 	// Grid navigation: track focused cell and compute row lengths for arrow key movement.
 	let focusedRow = 0;
@@ -160,93 +169,185 @@
 </script>
 
 {#key device}
-	<span id="grid-description" class="sr-only">{$t("device_view.grid_description")}</span>
+	{#if !usesSoomfonPhysicalLayout}
+		<span id="grid-description" class="sr-only">{$t("device_view.grid_description")}</span>
+	{/if}
 	<div
 		class="flex flex-col justify-center grow px-16 py-6 overflow-auto"
 		class:items-center={device.columns <= 9}
 		class:hidden={$inspectedParentAction || selectedDevice != device.id}
+		data-device-layout={usesSoomfonPhysicalLayout ? "soomfon-se" : "generic"}
 		class:device-fade-x={overflowsX && !overflowsY}
 		class:device-fade-y={overflowsY && !overflowsX}
 		class:device-fade-xy={overflowsX && overflowsY}
-		role="grid"
+		role={usesSoomfonPhysicalLayout ? "group" : "grid"}
 		aria-label={device.name}
-		aria-describedby="grid-description"
+		aria-describedby={usesSoomfonPhysicalLayout ? undefined : "grid-description"}
 		tabindex="-1"
 		on:click={() => inspectedInstance.set(null)}
 		on:keyup={() => inspectedInstance.set(null)}
 		on:keydown|capture={handleGridKeydown}
 		on:focusin={handleGridFocusin}
 	>
-		<div class="flex flex-col" role="rowgroup">
-			{#each { length: device.rows } as _, r}
-				<div class="flex flex-row" role="row">
-					{#each { length: device.columns } as _, c}
+		{#if usesSoomfonPhysicalLayout}
+			<!--
+				Soomfon SE controls retain OpenDeck's existing profile/event indices:
+				keys 0–5 are LCD keys, keys 6–8 are round buttons, encoder 1 is
+				the large upper-right knob, and encoders 0/2 are the lower knobs.
+			-->
+			<div class="soomfon-physical-layout">
+				<div class="soomfon-upper-controls">
+					<div class="soomfon-display-keys">
+						{#each { length: 2 } as _, r}
+							<div class="soomfon-display-row">
+								{#each { length: 3 } as _, c}
+									<Key
+										context={{ device: device.id, profile: profile.id, controller: "Keypad", position: r * 3 + c }}
+										bind:inslot={profile.keys[r * 3 + c]}
+										on:dragover={handleDragOver}
+										on:drop={(event) => handleDrop(event, "Keypad", r * 3 + c)}
+										on:dragstart={(event) => handleDragStart(event, "Keypad", r * 3 + c)}
+										{handlePaste}
+										size={144}
+										label="{$t('device_view.key')} {String.fromCharCode(65 + r)}{c + 1}"
+										role="button"
+										tabindex={0}
+									/>
+								{/each}
+							</div>
+						{/each}
+					</div>
+
+					<div class="soomfon-large-encoder">
 						<Key
-							context={{ device: device.id, profile: profile.id, controller: "Keypad", position: r * device.columns + c }}
-							bind:inslot={profile.keys[r * device.columns + c]}
+							context={{ device: device.id, profile: profile.id, controller: "Encoder", position: 1 }}
+							bind:inslot={profile.sliders[1]}
 							on:dragover={handleDragOver}
-							on:drop={(event) => handleDrop(event, "Keypad", r * device.columns + c)}
-							on:dragstart={(event) => handleDragStart(event, "Keypad", r * device.columns + c)}
+							on:drop={(event) => handleDrop(event, "Encoder", 1)}
+							on:dragstart={(event) => handleDragStart(event, "Encoder", 1)}
 							{handlePaste}
-							size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
-							label="{$t('device_view.key')} {String.fromCharCode(65 + r)}{c + 1}"
-							tabindex={focusedRow === r && focusedCol === c ? 0 : -1}
+							size={144}
+							scale={1.2}
+							label="{$t('device_view.encoder')} 2"
+							role="button"
+							tabindex={0}
 						/>
-					{/each}
+					</div>
 				</div>
-			{/each}
-		</div>
 
-		<div class="flex flex-row justify-between" role="row" style={`width: ${keypadRowWidth}px;`}>
-			{#each { length: device.encoders } as _, i}
-				<Key
-					context={{ device: device.id, profile: profile.id, controller: "Encoder", position: i }}
-					bind:inslot={profile.sliders[i]}
-					on:dragover={handleDragOver}
-					on:drop={(event) => handleDrop(event, "Encoder", i)}
-					on:dragstart={(event) => handleDragStart(event, "Encoder", i)}
-					{handlePaste}
-					size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
-					label="{$t('device_view.encoder')} {i + 1}"
-					tabindex={focusedRow === encoderRowIndex && focusedCol === i ? 0 : -1}
-				/>
-			{/each}
-		</div>
-
-		<div class="flex flex-row items-center" role="row">
-			{#each { length: device.touchpoints } as _, i}
-				<!-- On the Stream Deck Neo, the infobar display sits physically between the two touchpoints. -->
-				{#if device.infobars > 0 && i === 1}
-					{#each { length: device.infobars } as _, j}
-						<div class="px-3.5 py-[3.5px]">
+				<div class="soomfon-lower-controls">
+					<div class="soomfon-round-buttons">
+						{#each { length: 3 } as _, c}
 							<Key
-								context={{ device: device.id, profile: profile.id, controller: "Infobar", position: j }}
-								bind:inslot={profile.infobars[j]}
+								context={{ device: device.id, profile: profile.id, controller: "Keypad", position: 6 + c }}
+								bind:inslot={profile.keys[6 + c]}
 								on:dragover={handleDragOver}
-								on:drop={(event) => handleDrop(event, "Infobar", j)}
-								on:dragstart={(event) => handleDragStart(event, "Infobar", j)}
+								on:drop={(event) => handleDrop(event, "Keypad", 6 + c)}
+								on:dragstart={(event) => handleDragStart(event, "Keypad", 6 + c)}
+								{handlePaste}
+								size={144}
+								scale={0.6}
+								round
+								label="{$t('device_view.key')} C{c + 1}"
+								role="button"
+								tabindex={0}
+							/>
+						{/each}
+					</div>
+
+					<div class="soomfon-small-encoders">
+						{#each [0, 2] as i}
+							<div class="soomfon-small-encoder">
+								<Key
+									context={{ device: device.id, profile: profile.id, controller: "Encoder", position: i }}
+									bind:inslot={profile.sliders[i]}
+									on:dragover={handleDragOver}
+									on:drop={(event) => handleDrop(event, "Encoder", i)}
+									on:dragstart={(event) => handleDragStart(event, "Encoder", i)}
+									{handlePaste}
+									size={144}
+									scale={0.6}
+									label="{$t('device_view.encoder')} {i + 1}"
+									role="button"
+									tabindex={0}
+								/>
+							</div>
+						{/each}
+					</div>
+				</div>
+			</div>
+		{:else}
+			<div class="flex flex-col" role="rowgroup">
+				{#each { length: device.rows } as _, r}
+					<div class="flex flex-row" role="row">
+						{#each { length: device.columns } as _, c}
+							<Key
+								context={{ device: device.id, profile: profile.id, controller: "Keypad", position: r * device.columns + c }}
+								bind:inslot={profile.keys[r * device.columns + c]}
+								on:dragover={handleDragOver}
+								on:drop={(event) => handleDrop(event, "Keypad", r * device.columns + c)}
+								on:dragstart={(event) => handleDragStart(event, "Keypad", r * device.columns + c)}
 								{handlePaste}
 								size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
-								width={248}
-								height={58}
+								label="{$t('device_view.key')} {String.fromCharCode(65 + r)}{c + 1}"
+								tabindex={focusedRow === r && focusedCol === c ? 0 : -1}
 							/>
-						</div>
-					{/each}
-				{/if}
-				<Key
-					context={{ device: device.id, profile: profile.id, controller: "Keypad", position: device.rows * device.columns + i }}
-					bind:inslot={profile.keys[device.rows * device.columns + i]}
-					on:dragover={handleDragOver}
-					on:drop={(event) => handleDrop(event, "Keypad", device.rows * device.columns + i)}
-					on:dragstart={(event) => handleDragStart(event, "Keypad", device.rows * device.columns + i)}
-					{handlePaste}
-					size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
-					isTouchPoint
-					label="{$t('device_view.touchpoint')} {i + 1}"
-					tabindex={focusedRow === touchpointRowIndex && focusedCol === i ? 0 : -1}
-				/>
-			{/each}
-		</div>
+						{/each}
+					</div>
+				{/each}
+			</div>
+
+			<div class="flex flex-row justify-between" role="row" style={`width: ${keypadRowWidth}px;`}>
+				{#each { length: device.encoders } as _, i}
+					<Key
+						context={{ device: device.id, profile: profile.id, controller: "Encoder", position: i }}
+						bind:inslot={profile.sliders[i]}
+						on:dragover={handleDragOver}
+						on:drop={(event) => handleDrop(event, "Encoder", i)}
+						on:dragstart={(event) => handleDragStart(event, "Encoder", i)}
+						{handlePaste}
+						size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
+						label="{$t('device_view.encoder')} {i + 1}"
+						tabindex={focusedRow === encoderRowIndex && focusedCol === i ? 0 : -1}
+					/>
+				{/each}
+			</div>
+
+			<div class="flex flex-row items-center" role="row">
+				{#each { length: device.touchpoints } as _, i}
+					<!-- On the Stream Deck Neo, the infobar display sits physically between the two touchpoints. -->
+					{#if device.infobars > 0 && i === 1}
+						{#each { length: device.infobars } as _, j}
+							<div class="px-3.5 py-[3.5px]">
+								<Key
+									context={{ device: device.id, profile: profile.id, controller: "Infobar", position: j }}
+									bind:inslot={profile.infobars[j]}
+									on:dragover={handleDragOver}
+									on:drop={(event) => handleDrop(event, "Infobar", j)}
+									on:dragstart={(event) => handleDragStart(event, "Infobar", j)}
+									{handlePaste}
+									size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
+									width={248}
+									height={58}
+								/>
+							</div>
+						{/each}
+					{/if}
+					<Key
+						context={{ device: device.id, profile: profile.id, controller: "Keypad", position: device.rows * device.columns + i }}
+						bind:inslot={profile.keys[device.rows * device.columns + i]}
+						on:dragover={handleDragOver}
+						on:drop={(event) => handleDrop(event, "Keypad", device.rows * device.columns + i)}
+						on:dragstart={(event) => handleDragStart(event, "Keypad", device.rows * device.columns + i)}
+						{handlePaste}
+						size={device.id.startsWith("sd-") && device.rows == 4 && device.columns == 8 ? 192 : 144}
+						isTouchPoint
+						label="{$t('device_view.touchpoint')} {i + 1}"
+						tabindex={focusedRow === touchpointRowIndex && focusedCol === i ? 0 : -1}
+					/>
+				{/each}
+			</div>
+		{/if}
 	</div>
 {/key}
 
@@ -262,5 +363,43 @@
 			linear-gradient(to right, transparent, black 7.5rem, black calc(100% - 7.5rem), transparent),
 			linear-gradient(to bottom, transparent, black 7.5rem, black calc(100% - 7.5rem), transparent);
 		mask-composite: intersect;
+	}
+	.soomfon-physical-layout {
+		display: flex;
+		width: 564px;
+		height: 396px;
+		flex-direction: column;
+	}
+	.soomfon-upper-controls,
+	.soomfon-lower-controls,
+	.soomfon-display-row,
+	.soomfon-round-buttons {
+		display: flex;
+	}
+	.soomfon-upper-controls {
+		height: 264px;
+	}
+	.soomfon-display-keys,
+	.soomfon-round-buttons {
+		width: 396px;
+	}
+	.soomfon-large-encoder {
+		display: flex;
+		width: 168px;
+		align-items: center;
+		justify-content: center;
+	}
+	.soomfon-lower-controls {
+		height: 132px;
+	}
+	.soomfon-small-encoders {
+		display: grid;
+		width: 168px;
+		grid-template-columns: repeat(2, 84px);
+	}
+	.soomfon-small-encoder {
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 </style>
