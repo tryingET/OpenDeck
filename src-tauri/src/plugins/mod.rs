@@ -105,6 +105,7 @@ fn websocket_origin(origin: Option<&str>, port_base: u16) -> Option<WebSocketOri
 	}
 }
 
+#[cfg(test)]
 fn websocket_origin_allowed(origin: Option<&str>, port_base: u16) -> bool {
 	websocket_origin(origin, port_base).is_some()
 }
