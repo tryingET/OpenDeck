@@ -14,11 +14,22 @@ fn mime(extension: &str) -> String {
 	}
 }
 
+fn asset_origin_allowed(origin: &str, port_base: u16) -> bool {
+	let webserver_port = port_base + 2;
+	matches!(origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost")
+		|| origin == format!("http://localhost:{webserver_port}")
+		|| origin == format!("http://127.0.0.1:{webserver_port}")
+		|| cfg!(debug_assertions) && origin == "http://localhost:5173"
+}
+
 /// Start a simple webserver to serve files of plugins that run in a browser environment.
 pub async fn init_webserver(prefix: PathBuf) {
-	let prefix = prefix.canonicalize().unwrap();
+	let Ok(prefix) = prefix.canonicalize() else {
+		log::error!("Failed to resolve plugin asset root at {}", prefix.display());
+		return;
+	};
 	let server = {
-		let listener = std::net::TcpListener::bind(format!("0.0.0.0:{}", *super::PORT_BASE + 2)).unwrap();
+		let listener = std::net::TcpListener::bind(("127.0.0.1", *super::PORT_BASE + 2)).unwrap();
 
 		#[cfg(windows)]
 		{
@@ -32,30 +43,43 @@ pub async fn init_webserver(prefix: PathBuf) {
 	};
 
 	for request in server.incoming_requests() {
-		let mut url = urlencoding::decode(request.url()).unwrap().into_owned();
-		if url.contains('?') {
-			url = url.split_once('?').unwrap().0.to_owned();
+		let Ok(mut url) = urlencoding::decode(request.url()).map(|url| url.into_owned()) else {
+			let _ = request.respond(Response::empty(400));
+			continue;
+		};
+		if let Some((path, _)) = url.split_once('?') {
+			url = path.to_owned();
 		}
 		#[cfg(target_os = "windows")]
-		let url = url[1..].replace('/', "\\");
-		let path = Path::new(url.trim_end_matches("|opendeck_property_inspector").trim_end_matches("|opendeck_property_inspector_child"));
+		let url = url.strip_prefix('/').unwrap_or(&url).replace('/', "\\");
 
-		if !matches!(tokio::fs::try_exists(path).await, Ok(true)) {
-			let _ = request.respond(Response::empty(404));
-			continue;
-		}
+		let is_property_inspector = url.ends_with("|opendeck_property_inspector");
+		let is_property_inspector_child = url.ends_with("|opendeck_property_inspector_child");
+		let requested_path = url.trim_end_matches("|opendeck_property_inspector").trim_end_matches("|opendeck_property_inspector_child");
+		let path = match Path::new(requested_path).canonicalize() {
+			Ok(path) => path,
+			Err(_) => {
+				let _ = request.respond(Response::empty(404));
+				continue;
+			}
+		};
 
-		// Ensure the requested path is within the config directory to prevent unrestricted access to the filesystem.
-		let developer = crate::store::get_settings().value.developer;
-		if !developer && !path.canonicalize().is_ok_and(|p| p.starts_with(&prefix)) {
+		// Plugin assets are always confined to the canonical plugin directory, including in developer mode.
+		if !path.starts_with(&prefix) {
 			let _ = request.respond(Response::empty(403));
 			continue;
 		}
 
-		let access_control_allow_origin = Header {
-			field: "Access-Control-Allow-Origin".parse().unwrap(),
-			value: "*".parse().unwrap(),
-		};
+		let cors_origin = request.headers().iter().find(|header| header.field.equiv("Origin")).and_then(|header| {
+			let origin = header.value.to_string();
+			if !asset_origin_allowed(&origin, *super::PORT_BASE) {
+				return None;
+			}
+			Some(Header {
+				field: "Access-Control-Allow-Origin".parse().ok()?,
+				value: origin.parse().ok()?,
+			})
+		});
 
 		// The Svelte frontend cannot call the connectElgatoStreamDeckSocket function on property inspector frames
 		// because they are served from a different origin (this webserver on port 57118).
@@ -67,10 +91,8 @@ pub async fn init_webserver(prefix: PathBuf) {
 		// Instead, we have to inject a replacement window.open implementation that creates an IFrame element
 		// and requests the Svelte frontend to maximise the property inspector.
 
-		if url.ends_with("|opendeck_property_inspector") {
-			let path = &url[..url.len() - 28];
-
-			let mut content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+		if is_property_inspector {
+			let mut content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
 			content += r#"
 				<div id="opendeck_iframe_container" style="position: absolute; z-index: 100; top: 0; left: 0; width: 100%; height: 100%; display: none;"></div>
 				<script>
@@ -137,27 +159,29 @@ pub async fn init_webserver(prefix: PathBuf) {
 			"#;
 
 			let mut response = Response::from_string(content);
-			response.add_header(access_control_allow_origin);
+			if let Some(cors_origin) = cors_origin.clone() {
+				response.add_header(cors_origin);
+			}
 			response.add_header(Header {
 				field: "Content-Type".parse().unwrap(),
 				value: "text/html".parse().unwrap(),
 			});
 			let _ = request.respond(response);
-		} else if url.ends_with("|opendeck_property_inspector_child") {
-			let path = &url[..url.len() - 34];
-
-			let mut content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+		} else if is_property_inspector_child {
+			let mut content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
 			content = format!("<script>window.opener ??= window.parent;</script>{content}");
 
 			let mut response = Response::from_string(content);
-			response.add_header(access_control_allow_origin);
+			if let Some(cors_origin) = cors_origin.clone() {
+				response.add_header(cors_origin);
+			}
 			response.add_header(Header {
 				field: "Content-Type".parse().unwrap(),
 				value: "text/html".parse().unwrap(),
 			});
 			let _ = request.respond(response);
 		} else {
-			let mime_type = mime(&match Path::new(&url).extension() {
+			let mime_type = mime(&match path.extension() {
 				Some(extension) => extension.to_string_lossy().into_owned(),
 				None => "html".to_owned(),
 			});
@@ -168,19 +192,37 @@ pub async fn init_webserver(prefix: PathBuf) {
 			};
 
 			if mime_type.starts_with("text/") || mime_type == "image/svg+xml" {
-				let mut response = Response::from_string(tokio::fs::read_to_string(url).await.unwrap_or_default());
-				response.add_header(access_control_allow_origin);
+				let mut response = Response::from_string(tokio::fs::read_to_string(&path).await.unwrap_or_default());
+				if let Some(cors_origin) = cors_origin.clone() {
+					response.add_header(cors_origin);
+				}
 				response.add_header(content_type);
 				let _ = request.respond(response);
 			} else {
-				let mut response = Response::from_file(match tokio::fs::File::open(url).await {
+				let mut response = Response::from_file(match tokio::fs::File::open(&path).await {
 					Ok(file) => file.into_std().await,
 					Err(_) => continue,
 				});
-				response.add_header(access_control_allow_origin);
+				if let Some(cors_origin) = cors_origin {
+					response.add_header(cors_origin);
+				}
 				response.add_header(content_type);
 				let _ = request.respond(response);
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::asset_origin_allowed;
+
+	#[test]
+	fn cors_allows_only_application_and_plugin_server_origins() {
+		assert!(asset_origin_allowed("tauri://localhost", 57116));
+		assert!(asset_origin_allowed("http://tauri.localhost", 57116));
+		assert!(asset_origin_allowed("http://localhost:57118", 57116));
+		assert!(!asset_origin_allowed("https://attacker.invalid", 57116));
+		assert!(!asset_origin_allowed("http://localhost.attacker.invalid:57118", 57116));
 	}
 }

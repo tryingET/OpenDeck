@@ -7,7 +7,8 @@ use crate::store::profiles::get_device_profiles;
 use serde::Deserialize;
 
 pub async fn register_device(uuid: &str, mut event: PayloadEvent<crate::shared::DeviceInfo>) -> Result<(), anyhow::Error> {
-	if uuid.is_empty() || Some(uuid) == DEVICE_NAMESPACES.read().await.get(&event.payload.id[..2]).map(|x| x.as_str()) {
+	let namespace = event.payload.id.get(..2).ok_or_else(|| anyhow::anyhow!("device id is missing its namespace"))?;
+	if uuid.is_empty() || Some(uuid) == DEVICE_NAMESPACES.read().await.get(namespace).map(|x| x.as_str()) {
 		if let Ok(profiles) = get_device_profiles(&event.payload.id) {
 			let mut profile_stores = crate::store::profiles::PROFILE_STORES.write().await;
 			for profile in profiles {
@@ -46,12 +47,13 @@ pub async fn register_device(uuid: &str, mut event: PayloadEvent<crate::shared::
 
 		Ok(())
 	} else {
-		Err(anyhow::anyhow!("plugin {uuid} is not registered for device namespace {}", &event.payload.id[..2]))
+		Err(anyhow::anyhow!("plugin {uuid} is not registered for device namespace {namespace}"))
 	}
 }
 
 pub async fn deregister_device(uuid: &str, event: PayloadEvent<String>) -> Result<(), anyhow::Error> {
-	if uuid.is_empty() || Some(uuid) == DEVICE_NAMESPACES.read().await.get(&event.payload[..2]).map(|x| x.as_str()) {
+	let namespace = event.payload.get(..2).ok_or_else(|| anyhow::anyhow!("device id is missing its namespace"))?;
+	if uuid.is_empty() || Some(uuid) == DEVICE_NAMESPACES.read().await.get(namespace).map(|x| x.as_str()) {
 		if !DEVICES.contains_key(&event.payload) {
 			return Ok(());
 		}
@@ -91,7 +93,7 @@ pub async fn deregister_device(uuid: &str, event: PayloadEvent<String>) -> Resul
 
 		Ok(())
 	} else {
-		Err(anyhow::anyhow!("plugin {uuid} is not registered for device namespace {}", &event.payload[..2]))
+		Err(anyhow::anyhow!("plugin {uuid} is not registered for device namespace {namespace}"))
 	}
 }
 

@@ -6,6 +6,9 @@ use tauri::command;
 
 #[command]
 pub async fn make_info(plugin: String) -> Result<crate::plugins::info_param::Info, Error> {
+	if !crate::plugins::is_installed_plugin_uuid(&plugin) {
+		return Err(anyhow::anyhow!("unknown or unsafe plugin id").into());
+	}
 	let manifest = crate::plugins::manifest::read_manifest(&crate::shared::config_dir().join("plugins").join(&plugin))?;
 	Ok(crate::plugins::info_param::make_info(plugin, manifest.version, false).await)
 }
@@ -22,6 +25,9 @@ pub async fn switch_property_inspector(old: Option<ActionContext>, new: Option<A
 
 #[command]
 pub async fn open_url(url: String) -> Result<(), Error> {
+	if !crate::plugins::is_allowed_external_url(&url) {
+		return Err(anyhow::anyhow!("refusing to open URL with unsafe or unsupported scheme").into());
+	}
 	if let Err(error) = open::that_detached(url) {
 		return Err(anyhow::Error::from(error).into());
 	}

@@ -42,17 +42,17 @@
 			if (response.ok) {
 				marked.use(markedAlert());
 				marked.use(baseUrl(url));
-				return await marked.parse(DOMPurify.sanitize(await response.text()).replace(/<a/g, '<a target="_blank" '));
+				return DOMPurify.sanitize(await marked.parse(await response.text()));
 			}
 		}
-		return await marked.parse($t("plugin_details.readme.not_found", { repo }));
+		return DOMPurify.sanitize(await marked.parse($t("plugin_details.readme.not_found", { repo })));
 	}
 
 	function handleReadmeClick(event: MouseEvent | KeyboardEvent) {
 		const link = (event.target as HTMLElement).closest("a");
 		if (link && link.href) {
 			event.preventDefault();
-			window.open(link.href);
+			invoke("open_url", { url: link.href }).catch((error) => console.warn("Refused to open plugin README link:", error));
 		}
 	}
 

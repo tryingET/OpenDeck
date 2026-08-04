@@ -9,12 +9,19 @@ use crate::shared::{CATEGORIES, Category, config_dir, convert_icon, is_flatpak, 
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::{LazyLock, mpsc};
-use std::{fs, path};
+use std::{
+	fs,
+	path::{self, Path},
+};
 
 use tauri::{AppHandle, Manager};
 
 use futures::StreamExt;
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::{
+	handshake::server::{ErrorResponse, Request, Response},
+	http::{StatusCode, header::ORIGIN},
+};
 
 use anyhow::anyhow;
 use log::{error, warn};
@@ -36,11 +43,54 @@ enum PluginInstance {
 pub static DEVICE_NAMESPACES: LazyLock<RwLock<HashMap<String, String>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 static INSTANCES: LazyLock<Mutex<HashMap<String, PluginInstance>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) const ALTERNATIVE_ELGATO_PLUGIN_UUID: &str = "opendeck_alternative_elgato_implementation";
+
+pub(crate) fn is_safe_plugin_uuid(uuid: &str) -> bool {
+	!uuid.is_empty()
+		&& uuid.len() <= 255
+		&& uuid.ends_with(".sdPlugin")
+		&& uuid.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+		&& Path::new(uuid).file_name().and_then(|name| name.to_str()) == Some(uuid)
+		&& Path::new(uuid).components().count() == 1
+}
+
+fn canonical_installed_plugin_path(uuid: &str) -> Option<path::PathBuf> {
+	if !is_safe_plugin_uuid(uuid) {
+		return None;
+	}
+
+	let plugin_root = config_dir().join("plugins").canonicalize().ok()?;
+	let plugin_path = plugin_root.join(uuid).canonicalize().ok()?;
+	(plugin_path.starts_with(&plugin_root) && plugin_path.is_dir() && plugin_path.join("manifest.json").is_file()).then_some(plugin_path)
+}
+
+pub(crate) fn is_installed_plugin_uuid(uuid: &str) -> bool {
+	canonical_installed_plugin_path(uuid).is_some()
+}
+
+pub(crate) fn is_known_plugin_registration_uuid(uuid: &str) -> bool {
+	uuid == ALTERNATIVE_ELGATO_PLUGIN_UUID || is_installed_plugin_uuid(uuid)
+}
+
+fn websocket_origin_allowed(origin: Option<&str>, port_base: u16) -> bool {
+	match origin {
+		None => true,
+		Some(origin) => {
+			let webserver_port = port_base + 2;
+			origin == format!("http://localhost:{webserver_port}") || origin == format!("http://127.0.0.1:{webserver_port}")
+		}
+	}
+}
+
+pub(crate) fn is_allowed_external_url(url: &str) -> bool {
+	reqwest::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "mailto"))
+}
+
 pub static PORT_BASE: LazyLock<u16> = LazyLock::new(|| {
 	let mut base = 57116;
 	loop {
-		let websocket_result = std::net::TcpListener::bind(format!("0.0.0.0:{}", base));
-		let webserver_result = std::net::TcpListener::bind(format!("0.0.0.0:{}", base + 2));
+		let websocket_result = std::net::TcpListener::bind(("127.0.0.1", base));
+		let webserver_result = std::net::TcpListener::bind(("127.0.0.1", base + 2));
 		if websocket_result.is_ok() && webserver_result.is_ok() {
 			log::debug!("Using ports {} and {}", base, base + 2);
 			break;
@@ -69,7 +119,19 @@ pub type SpawnRequest = Box<dyn FnOnce() -> Result<(String, PluginChildType, Com
 
 /// Initialise a plugin from a given directory.
 pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<SpawnRequest>) -> anyhow::Result<()> {
-	let plugin_uuid = path.file_name().unwrap().to_str().unwrap().to_owned();
+	let plugin_uuid = path
+		.file_name()
+		.and_then(|name| name.to_str())
+		.ok_or_else(|| anyhow!("plugin directory name is not valid UTF-8"))?
+		.to_owned();
+	if !is_safe_plugin_uuid(&plugin_uuid) {
+		return Err(anyhow!("unsafe plugin directory name: {plugin_uuid}"));
+	}
+	let supplied_path = path.canonicalize()?;
+	let path = canonical_installed_plugin_path(&plugin_uuid).ok_or_else(|| anyhow!("plugin directory is outside the canonical plugin root: {plugin_uuid}"))?;
+	if supplied_path != path {
+		return Err(anyhow!("supplied plugin path does not match the canonical installed path: {plugin_uuid}"));
+	}
 	let plugin_uuid_2 = plugin_uuid.clone();
 
 	let mut manifest = manifest::read_manifest(&path)?;
@@ -405,12 +467,12 @@ pub async fn deactivate_plugins() {
 
 /// Initialise plugins from the plugins directory.
 pub fn initialise_plugins() {
-	tokio::spawn(init_websocket_server());
-	tokio::spawn(webserver::init_webserver(config_dir()));
-
 	let plugin_dir = config_dir().join("plugins");
 	let _ = fs::create_dir_all(&plugin_dir);
 	let _ = fs::create_dir_all(log_dir().join("plugins"));
+
+	tokio::spawn(init_websocket_server());
+	tokio::spawn(webserver::init_webserver(plugin_dir.clone()));
 
 	if let Ok(Ok(entries)) = APP_HANDLE.get().unwrap().path().resolve("plugins", tauri::path::BaseDirectory::Resource).map(fs::read_dir) {
 		for entry in entries.flatten() {
@@ -516,7 +578,7 @@ pub fn initialise_plugins() {
 
 /// Start the WebSocket server that plugins communicate with.
 async fn init_websocket_server() {
-	let listener = match TcpListener::bind(format!("0.0.0.0:{}", *PORT_BASE)).await {
+	let listener = match TcpListener::bind(("127.0.0.1", *PORT_BASE)).await {
 		Ok(listener) => listener,
 		Err(error) => {
 			error!("Failed to bind plugin WebSocket server to socket: {}", error);
@@ -539,7 +601,21 @@ async fn init_websocket_server() {
 
 /// Handle incoming data from a WebSocket connection.
 async fn accept_connection(stream: TcpStream) {
-	let mut socket = match tokio_tungstenite::accept_async(stream).await {
+	let mut socket = match tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
+		let origin_allowed = match request.headers().get(ORIGIN) {
+			None => websocket_origin_allowed(None, *PORT_BASE),
+			Some(origin) => origin.to_str().ok().is_some_and(|origin| websocket_origin_allowed(Some(origin), *PORT_BASE)),
+		};
+		if origin_allowed {
+			Ok(response)
+		} else {
+			let mut response = ErrorResponse::new(Some("WebSocket origin is not allowed".to_owned()));
+			*response.status_mut() = StatusCode::FORBIDDEN;
+			Err(response)
+		}
+	})
+	.await
+	{
 		Ok(socket) => socket,
 		Err(error) => {
 			warn!("Failed to complete WebSocket handshake: {}", error);
@@ -547,13 +623,48 @@ async fn accept_connection(stream: TcpStream) {
 		}
 	};
 
-	let Ok(register_event) = socket.next().await.unwrap() else {
+	let Some(Ok(register_event)) = socket.next().await else {
 		return;
 	};
-	match serde_json::from_str(&register_event.clone().into_text().unwrap()) {
+	let Ok(register_event) = register_event.into_text() else {
+		warn!("Rejected WebSocket connection without a text registration event");
+		return;
+	};
+	match serde_json::from_str(register_event.as_ref()) {
 		Ok(event) => crate::events::register_plugin(event, socket).await,
-		Err(_) => {
-			let _ = crate::events::inbound::process_incoming_message(Ok(register_event), "", false).await;
-		}
+		Err(error) => warn!("Rejected WebSocket connection with invalid registration event: {error}"),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{ALTERNATIVE_ELGATO_PLUGIN_UUID, is_allowed_external_url, is_safe_plugin_uuid, websocket_origin_allowed};
+
+	#[test]
+	fn plugin_uuid_must_be_one_safe_plugin_directory_name() {
+		assert!(is_safe_plugin_uuid("st.lynx.plugins.opendeck-akp03.sdPlugin"));
+		assert!(!is_safe_plugin_uuid(ALTERNATIVE_ELGATO_PLUGIN_UUID));
+		assert!(!is_safe_plugin_uuid("../escape.sdPlugin"));
+		assert!(!is_safe_plugin_uuid("/tmp/escape.sdPlugin"));
+		assert!(!is_safe_plugin_uuid("plugin"));
+		assert!(!is_safe_plugin_uuid("bad name.sdPlugin"));
+	}
+
+	#[test]
+	fn websocket_origin_is_native_or_exact_local_webserver() {
+		assert!(websocket_origin_allowed(None, 57116));
+		assert!(websocket_origin_allowed(Some("http://localhost:57118"), 57116));
+		assert!(websocket_origin_allowed(Some("http://127.0.0.1:57118"), 57116));
+		assert!(!websocket_origin_allowed(Some("https://attacker.invalid"), 57116));
+		assert!(!websocket_origin_allowed(Some("http://localhost.attacker.invalid:57118"), 57116));
+	}
+
+	#[test]
+	fn external_url_scheme_allowlist_blocks_local_and_custom_handlers() {
+		assert!(is_allowed_external_url("https://example.com/path"));
+		assert!(is_allowed_external_url("mailto:security@example.com"));
+		assert!(!is_allowed_external_url("file:///etc/passwd"));
+		assert!(!is_allowed_external_url("opendeck://plugins/install/example"));
+		assert!(!is_allowed_external_url("not a url"));
 	}
 }

@@ -65,22 +65,13 @@ pub async fn list_plugins(app: AppHandle) -> Result<Vec<PluginInfo>, Error> {
 
 #[command]
 pub async fn install_plugin(app: AppHandle, url: Option<String>, file: Option<String>, fallback_id: Option<String>) -> Result<(), Error> {
-	let bytes = match file {
-		None => {
-			let resp = match reqwest::get(url.unwrap()).await {
-				Ok(resp) => resp,
-				Err(error) => return Err(anyhow::Error::from(error).into()),
-			};
-			use std::ops::Deref;
-			match resp.bytes().await {
-				Ok(bytes) => bytes.deref().to_owned(),
-				Err(error) => return Err(anyhow::Error::from(error).into()),
-			}
-		}
-		Some(path) => match std::fs::read(path) {
+	let bytes = match (url, file) {
+		(Some(_), _) => return Err(anyhow::anyhow!("remote plugin installation is disabled; download and verify the archive before installing it from a local file").into()),
+		(None, Some(path)) => match std::fs::read(path) {
 			Ok(bytes) => bytes,
 			Err(error) => return Err(anyhow::Error::from(error).into()),
 		},
+		(None, None) => return Err(anyhow::anyhow!("a verified local plugin archive is required").into()),
 	};
 
 	let id = match crate::zip_extract::dir_name(std::io::Cursor::new(&bytes)) {
@@ -93,6 +84,9 @@ pub async fn install_plugin(app: AppHandle, url: Option<String>, file: Option<St
 			None => return Err(anyhow::Error::from(error).into()),
 		},
 	};
+	if !crate::plugins::is_safe_plugin_uuid(&id) {
+		return Err(anyhow::anyhow!("plugin archive contains an unsafe top-level directory name").into());
+	}
 
 	let _ = deactivate_plugin(&app, &id).await;
 
@@ -129,6 +123,9 @@ pub async fn install_plugin(app: AppHandle, url: Option<String>, file: Option<St
 
 #[command]
 pub async fn remove_plugin(app: AppHandle, id: String) -> Result<(), Error> {
+	if !crate::plugins::is_safe_plugin_uuid(&id) {
+		return Err(anyhow::anyhow!("unsafe plugin id").into());
+	}
 	let locks = acquire_locks().await;
 	let all = locks.profile_stores.all_from_plugin(&id);
 	drop(locks);
@@ -156,6 +153,10 @@ pub async fn remove_plugin(app: AppHandle, id: String) -> Result<(), Error> {
 
 #[command]
 pub async fn reload_plugin(app: AppHandle, id: String) {
+	if !crate::plugins::is_installed_plugin_uuid(&id) {
+		log::warn!("Refusing to reload unknown or unsafe plugin id {id:?}");
+		return;
+	}
 	let _ = deactivate_plugin(&app, &id).await;
 	let tx = (*app.state::<mpsc::Sender<SpawnRequest>>()).clone();
 	let _ = initialise_plugin(config_dir().join("plugins").join(&id), tx).await;
@@ -176,6 +177,9 @@ pub async fn reload_plugin(app: AppHandle, id: String) {
 
 #[command]
 pub async fn show_settings_interface(plugin: String) -> Result<(), Error> {
+	if !crate::plugins::is_installed_plugin_uuid(&plugin) {
+		return Err(anyhow::anyhow!("unknown or unsafe plugin id").into());
+	}
 	crate::events::outbound::settings::show_settings_interface(&plugin).await?;
 	Ok(())
 }

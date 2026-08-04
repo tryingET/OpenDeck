@@ -42,6 +42,9 @@ struct DidReceiveGlobalSettingsEvent {
 }
 
 pub async fn did_receive_global_settings(context: &str, to_property_inspector: bool) -> Result<(), anyhow::Error> {
+	if !crate::plugins::is_safe_plugin_uuid(context) {
+		return Err(anyhow::anyhow!("unsafe plugin id for global settings"));
+	}
 	let settings_dir = crate::shared::config_dir().join("settings");
 	let path = settings_dir.join(format!("{}.json", context));
 	let settings: serde_json::Value = match std::fs::File::open(&path) {

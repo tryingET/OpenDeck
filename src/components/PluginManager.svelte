@@ -30,6 +30,18 @@
 	}, 1e3);
 
 	async function installPlugin(name: string, url: string | null, file: string | null, fallback_id: string | null) {
+		if (url) {
+			try {
+				await invoke("open_url", { url });
+				await message("Automatic remote plugin installation is disabled. Verify the downloaded archive, then use Install from file.", {
+					title: $t("plugin_manager.install.title", { name }),
+					buttons: { ok: $t("dialog.ok") },
+				});
+			} catch (error: any) {
+				message(error, { title: $t("plugin_manager.install.error", { name }), buttons: { ok: $t("dialog.ok") } });
+			}
+			return;
+		}
 		if (
 			!file &&
 			!(await ask($t("plugin_manager.install.prompt"), {
