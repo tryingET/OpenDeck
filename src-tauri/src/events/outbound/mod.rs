@@ -58,8 +58,8 @@ async fn send_to_plugin(plugin: &str, data: &impl Serialize) -> Result<(), anyho
 	let message = tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(data)?.into());
 	let mut sockets = super::PLUGIN_SOCKETS.lock().await;
 
-	if let Some(socket) = sockets.get_mut(plugin) {
-		socket.send(message).await?;
+	if let Some(entry) = sockets.get_mut(plugin) {
+		entry.sink.send(message).await?;
 	} else {
 		let mut queues = super::PLUGIN_QUEUES.write().await;
 		if queues.contains_key(plugin) {
@@ -92,8 +92,8 @@ async fn send_to_property_inspector(context: &crate::shared::ActionContext, data
 	let message = tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(data)?.into());
 	let mut sockets = super::PROPERTY_INSPECTOR_SOCKETS.lock().await;
 
-	if let Some(socket) = sockets.get_mut(&context.to_string()) {
-		socket.send(message).await?;
+	if let Some(entry) = sockets.get_mut(&context.to_string()) {
+		entry.sink.send(message).await?;
 	} else {
 		let mut queues = super::PROPERTY_INSPECTOR_QUEUES.write().await;
 		if queues.contains_key(&context.to_string()) {
