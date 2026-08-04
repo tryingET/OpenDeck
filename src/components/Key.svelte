@@ -39,6 +39,7 @@
 	export let active: boolean = true;
 	export let scale: number = 1;
 	export let isTouchPoint: boolean = false;
+	export let round: boolean = false;
 	let pressed: boolean = false;
 
 	let state: ActionState | undefined;
@@ -197,7 +198,7 @@
 		class="relative border-3 border-neutral-700 rounded-3xl outline-none outline-offset-2 outline-blue-500"
 		style={`margin: ${-((size + 3 * 2 /* border */ - 132) /* desired outer size */ / 2)}px;`}
 		class:outline-solid={active && ((slot && $inspectedInstance == slot.context) || (context && $inspectedInstance == context))}
-		class:rounded-full!={context?.controller == "Encoder"}
+		class:rounded-full!={round || context?.controller == "Encoder"}
 		class:rounded-lg!={context?.controller == "Infobar"}
 		class:bg-black={slot != null}
 		{width}

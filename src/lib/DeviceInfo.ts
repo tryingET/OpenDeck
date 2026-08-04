@@ -1,5 +1,6 @@
 export type DeviceInfo = {
 	id: string;
+	plugin: string;
 	name: string;
 	rows: number;
 	columns: number;
