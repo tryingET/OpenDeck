@@ -418,6 +418,7 @@ pub async fn initialise_plugin(path: path::PathBuf, spawner_tx: mpsc::Sender<Spa
 }
 
 pub async fn deactivate_plugin(app: &AppHandle, uuid: &str) -> Result<(), anyhow::Error> {
+	crate::events::disconnect_plugin(uuid).await;
 	{
 		let mut namespaces = DEVICE_NAMESPACES.write().await;
 		if let Some((namespace, _)) = namespaces.clone().iter().find(|(_, plugin)| uuid == **plugin) {
@@ -595,7 +596,11 @@ async fn init_websocket_server() {
 	}
 
 	while let Ok((stream, _)) = listener.accept().await {
-		accept_connection(stream).await;
+		tokio::spawn(async move {
+			if tokio::time::timeout(std::time::Duration::from_secs(10), accept_connection(stream)).await.is_err() {
+				warn!("Rejected WebSocket connection that did not register within 10 seconds");
+			}
+		});
 	}
 }
 

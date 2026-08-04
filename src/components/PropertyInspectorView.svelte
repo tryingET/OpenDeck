@@ -85,9 +85,17 @@
 		}
 	};
 
-	window.addEventListener("message", ({ data }) => {
+	const pluginServerOrigin = new URL(getWebserverUrl()).origin;
+	window.addEventListener("message", (event: MessageEvent) => {
+		if (event.origin !== pluginServerOrigin || !event.source) return;
+		const trustedIframe = Object.entries(iframes).find(([, iframe]) => iframe?.contentWindow === event.source);
+		if (!trustedIframe) return;
+
+		const [context, iframe] = trustedIframe;
+		const data = event.data;
+		if (!data || typeof data !== "object") return;
+
 		if (data.event == "windowOpened") {
-			const iframe = iframes[data.payload];
 			iframe.style.position = "absolute";
 			iframe.style.left = "36px";
 			iframe.style.top = "36px";
@@ -95,7 +103,7 @@
 			iframe.style.height = "calc(100% - 72px)";
 			iframe.style.display = "block";
 
-			iframePopupsOpen.push(data.payload);
+			if (!iframePopupsOpen.includes(context)) iframePopupsOpen.push(context);
 
 			iframeContainer.style.position = "absolute";
 			iframeContainer.style.width = "100%";
@@ -106,10 +114,10 @@
 
 			iframeClosePopup.style.display = "block";
 		} else if (data.event == "windowClosed") {
-			closePopup(data.payload);
-		} else if (data.event == "openUrl") {
+			closePopup(context);
+		} else if (data.event == "openUrl" && typeof data.payload === "string") {
 			invoke("open_url", { url: data.payload });
-		} else if (data.event == "fetch") {
+		} else if (data.event == "fetch" && data.payload && Array.isArray(data.payload.args)) {
 			function combineUint8Arrays(arrays: Uint8Array[]): Uint8Array {
 				const totalLength = arrays.reduce((acc, curr) => acc + curr.length, 0);
 				let mergedArray = new Uint8Array(totalLength);
@@ -123,6 +131,7 @@
 				return mergedArray;
 			}
 
+			const requestId = data.payload.id;
 			window
 				// @ts-expect-error
 				.fetchCORS(...data.payload.args)
@@ -138,11 +147,11 @@
 					}
 					const body = combineUint8Arrays(chunks);
 
-					iframes[data.payload.context]?.contentWindow?.postMessage(
+					iframe.contentWindow?.postMessage(
 						{
 							event: "fetchResponse",
 							payload: {
-								id: data.payload.id,
+								id: requestId,
 								response: {
 									url: response.url,
 									body,
@@ -156,7 +165,7 @@
 					);
 				})
 				.catch((error: any) => {
-					iframes[data.payload.context]?.contentWindow?.postMessage({ event: "fetchError", payload: { id: data.payload.id, error } }, getWebserverUrl());
+					iframe.contentWindow?.postMessage({ event: "fetchError", payload: { id: requestId, error } }, getWebserverUrl());
 				});
 		}
 	});

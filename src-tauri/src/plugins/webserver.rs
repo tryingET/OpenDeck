@@ -98,9 +98,12 @@ pub async fn init_webserver(prefix: PathBuf) {
 				<script>
 					const opendeck_window_open = window.open;
 					const opendeck_iframe_container = document.getElementById("opendeck_iframe_container");
+					const opendeck_parent_origins = new Set(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://localhost:5173"]);
 
 					window.addEventListener("message", (event) => {
+						if (event.source !== window.parent || !opendeck_parent_origins.has(event.origin)) return;
 						const data = event.data;
+						if (!data || typeof data !== "object") return;
 						if (data.event == "connect") {
 							event.stopImmediatePropagation();
 							if (typeof connectOpenActionSocket === "function") connectOpenActionSocket(...data.payload);
@@ -137,16 +140,22 @@ pub async fn init_webserver(prefix: PathBuf) {
 					let opendeck_fetch_count = 0;
 					let opendeck_fetch_promises = {};
 					window.addEventListener("message", (event) => {
+						if (event.source !== window.parent || !opendeck_parent_origins.has(event.origin)) return;
 						const data = event.data;
+						if (!data || typeof data !== "object") return;
 						if (data.event == "fetchResponse") {
+							const pending = data.payload && opendeck_fetch_promises[data.payload.id];
+							if (!pending) return;
 							event.stopImmediatePropagation();
 							const response = new Response(data.payload.response.body, data.payload.response);
 							Object.defineProperty(response, "url", { value: data.payload.response.url });
-							opendeck_fetch_promises[data.payload.id].resolve(response);
+							pending.resolve(response);
 							delete opendeck_fetch_promises[data.payload.id];
 						} else if (data.event == "fetchError") {
+							const pending = data.payload && opendeck_fetch_promises[data.payload.id];
+							if (!pending) return;
 							event.stopImmediatePropagation();
-							opendeck_fetch_promises[data.payload.id].reject(data.payload.error);
+							pending.reject(data.payload.error);
 							delete opendeck_fetch_promises[data.payload.id];
 						}
 					});
