@@ -3442,6 +3442,7 @@ dependencies = [
  "fix-path-env",
  "font-loader",
  "futures",
+ "getrandom 0.3.4",
  "hidapi",
  "image",
  "json-patch 4.2.0",

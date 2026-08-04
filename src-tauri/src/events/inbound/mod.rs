@@ -19,7 +19,7 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub enum RegisterEvent {
 	RegisterPlugin { uuid: String },
-	RegisterPropertyInspector { uuid: String },
+	RegisterPropertyInspector { uuid: String, token: String },
 }
 
 #[derive(Deserialize)]
@@ -145,10 +145,10 @@ pub async fn process_incoming_message(data: Result<Message, Error>, uuid: &str, 
 			InboundEventType::EncoderDown(event) => devices::encoder_down(event).await,
 			InboundEventType::EncoderUp(event) => devices::encoder_up(event).await,
 			InboundEventType::TouchscreenPress(event) => devices::touchscreen_press(event).await,
-			InboundEventType::SetSettings(event) => settings::set_settings(event, false).await,
-			InboundEventType::GetSettings(event) => settings::get_settings(event, false).await,
-			InboundEventType::SetGlobalSettings(event) => settings::set_global_settings(event, false).await,
-			InboundEventType::GetGlobalSettings(event) => settings::get_global_settings(event, false).await,
+			InboundEventType::SetSettings(event) => settings::set_settings(event, false, None).await,
+			InboundEventType::GetSettings(event) => settings::get_settings(event, false, None).await,
+			InboundEventType::SetGlobalSettings(event) => settings::set_global_settings(event, false, None).await,
+			InboundEventType::GetGlobalSettings(event) => settings::get_global_settings(event, false, None).await,
 			InboundEventType::OpenUrl(event) => misc::open_url(event).await,
 			InboundEventType::LogMessage(event) => misc::log_message(Some(uuid), event).await,
 			InboundEventType::SetTitle(event) => states::set_title(event).await,
@@ -169,7 +169,7 @@ pub async fn process_incoming_message(data: Result<Message, Error>, uuid: &str, 
 	}
 }
 
-pub async fn process_incoming_message_pi(data: Result<Message, Error>, uuid: &str) {
+pub async fn process_incoming_message_pi(data: Result<Message, Error>, uuid: &str, owner_plugin: &str) {
 	if let Ok(Message::Text(text)) = data {
 		let decoded: InboundEventType = match serde_json::from_str(&text) {
 			Ok(event) => event,
@@ -192,13 +192,13 @@ pub async fn process_incoming_message_pi(data: Result<Message, Error>, uuid: &st
 		}
 
 		if let Err(error) = match decoded {
-			InboundEventType::SetSettings(event) => settings::set_settings(event, true).await,
-			InboundEventType::GetSettings(event) => settings::get_settings(event, true).await,
-			InboundEventType::SetGlobalSettings(event) => settings::set_global_settings(event, true).await,
-			InboundEventType::GetGlobalSettings(event) => settings::get_global_settings(event, true).await,
+			InboundEventType::SetSettings(event) => settings::set_settings(event, true, Some(owner_plugin)).await,
+			InboundEventType::GetSettings(event) => settings::get_settings(event, true, Some(owner_plugin)).await,
+			InboundEventType::SetGlobalSettings(event) => settings::set_global_settings(event, true, Some(owner_plugin)).await,
+			InboundEventType::GetGlobalSettings(event) => settings::get_global_settings(event, true, Some(owner_plugin)).await,
 			InboundEventType::OpenUrl(event) => misc::open_url(event).await,
 			InboundEventType::LogMessage(event) => misc::log_message(None, event).await,
-			InboundEventType::SendToPlugin(event) => property_inspector::send_to_plugin(event).await,
+			InboundEventType::SendToPlugin(event) => property_inspector::send_to_plugin(event, owner_plugin).await,
 			_ => Ok(()),
 		} && !error.to_string().contains("closed connection")
 		{

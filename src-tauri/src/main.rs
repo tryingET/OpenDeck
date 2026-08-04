@@ -92,6 +92,7 @@ async fn main() {
 			frontend::profiles::delete_profile,
 			frontend::profiles::rename_profile,
 			frontend::property_inspector::make_info,
+			frontend::property_inspector::issue_registration,
 			frontend::property_inspector::switch_property_inspector,
 			frontend::property_inspector::open_url,
 			frontend::plugins::list_plugins,

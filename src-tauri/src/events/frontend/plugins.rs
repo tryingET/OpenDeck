@@ -1,6 +1,6 @@
 use super::Error;
 
-use crate::plugins::{SpawnRequest, deactivate_plugin, initialise_plugin};
+use crate::plugins::{SpawnRequest, deactivate_plugin, initialise_plugin, lock_plugin_lifecycle};
 use crate::shared::{config_dir, log_dir};
 use crate::store::profiles::{acquire_locks, get_instance};
 
@@ -87,6 +87,7 @@ pub async fn install_plugin(app: AppHandle, url: Option<String>, file: Option<St
 	if !crate::plugins::is_safe_plugin_uuid(&id) {
 		return Err(anyhow::anyhow!("plugin archive contains an unsafe top-level directory name").into());
 	}
+	let _lifecycle = lock_plugin_lifecycle(&id).await;
 
 	let _ = deactivate_plugin(&app, &id).await;
 
@@ -126,6 +127,7 @@ pub async fn remove_plugin(app: AppHandle, id: String) -> Result<(), Error> {
 	if !crate::plugins::is_safe_plugin_uuid(&id) {
 		return Err(anyhow::anyhow!("unsafe plugin id").into());
 	}
+	let _lifecycle = lock_plugin_lifecycle(&id).await;
 	let locks = acquire_locks().await;
 	let all = locks.profile_stores.all_from_plugin(&id);
 	drop(locks);
@@ -157,6 +159,7 @@ pub async fn reload_plugin(app: AppHandle, id: String) {
 		log::warn!("Refusing to reload unknown or unsafe plugin id {id:?}");
 		return;
 	}
+	let _lifecycle = lock_plugin_lifecycle(&id).await;
 	let _ = deactivate_plugin(&app, &id).await;
 	let tx = (*app.state::<mpsc::Sender<SpawnRequest>>()).clone();
 	let _ = initialise_plugin(config_dir().join("plugins").join(&id), tx).await;

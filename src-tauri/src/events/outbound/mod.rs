@@ -9,7 +9,6 @@ pub mod settings;
 pub mod states;
 pub mod will_appear;
 
-use futures::SinkExt;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -56,20 +55,7 @@ impl GenericInstancePayload {
 
 async fn send_to_plugin(plugin: &str, data: &impl Serialize) -> Result<(), anyhow::Error> {
 	let message = tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(data)?.into());
-	let mut sockets = super::PLUGIN_SOCKETS.lock().await;
-
-	if let Some(entry) = sockets.get_mut(plugin) {
-		entry.sink.send(message).await?;
-	} else {
-		let mut queues = super::PLUGIN_QUEUES.write().await;
-		if queues.contains_key(plugin) {
-			queues.get_mut(plugin).unwrap().push(message);
-		} else {
-			queues.insert(plugin.to_owned(), vec![message]);
-		}
-	}
-
-	Ok(())
+	super::send_plugin_message(plugin, message).await
 }
 
 async fn send_to_all_plugins(data: &impl Serialize) -> Result<(), anyhow::Error> {
@@ -87,21 +73,7 @@ async fn send_to_all_plugins(data: &impl Serialize) -> Result<(), anyhow::Error>
 	Ok(())
 }
 
-#[allow(clippy::map_entry)]
-async fn send_to_property_inspector(context: &crate::shared::ActionContext, data: &impl Serialize) -> Result<(), anyhow::Error> {
+async fn send_to_property_inspector(context: &crate::shared::ActionContext, owner_plugin: &str, data: &impl Serialize) -> Result<(), anyhow::Error> {
 	let message = tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(data)?.into());
-	let mut sockets = super::PROPERTY_INSPECTOR_SOCKETS.lock().await;
-
-	if let Some(entry) = sockets.get_mut(&context.to_string()) {
-		entry.sink.send(message).await?;
-	} else {
-		let mut queues = super::PROPERTY_INSPECTOR_QUEUES.write().await;
-		if queues.contains_key(&context.to_string()) {
-			queues.get_mut(&context.to_string()).unwrap().push(message);
-		} else {
-			queues.insert(context.to_string(), vec![message]);
-		}
-	}
-
-	Ok(())
+	super::send_property_inspector_message(&context.to_string(), owner_plugin, message).await
 }

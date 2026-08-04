@@ -11,8 +11,11 @@ struct SendToEvent {
 	payload: serde_json::Value,
 }
 
-pub async fn send_to_plugin(context: ActionContext, message: serde_json::Value) -> Result<(), anyhow::Error> {
+pub async fn send_to_plugin(context: ActionContext, owner_plugin: &str, message: serde_json::Value) -> Result<(), anyhow::Error> {
 	if let Some(instance) = crate::store::profiles::get_instance(&context, &acquire_locks().await).await? {
+		if instance.action.plugin != owner_plugin {
+			return Ok(());
+		}
 		super::send_to_plugin(
 			&instance.action.plugin,
 			&SendToEvent {
@@ -32,6 +35,7 @@ pub async fn send_to_property_inspector(context: ActionContext, message: serde_j
 	if let Some(instance) = crate::store::profiles::get_instance(&context, &acquire_locks().await).await? {
 		super::send_to_property_inspector(
 			&context,
+			&instance.action.plugin,
 			&SendToEvent {
 				event: "sendToPropertyInspector",
 				action: instance.action.uuid.clone(),
