@@ -4,6 +4,16 @@ Linux software for your Elgato Stream Deck
 
 ![Main menu](.github/readme/mainmenu.png)
 [More screenshots](#showcase)
+> [!IMPORTANT]
+> **This is a hardened fork of OpenDeck** (branch `opendeck-hardening-20260804`), maintained separately from upstream. It is **not** affiliated with upstream OpenDeck.
+>
+> Changes on this branch:
+> - **Plugin security hardening** — tightened plugin session boundaries, authenticated property-inspector control plane, locked plugin inputs, and closed session race conditions.
+> - **New hardware** — maps the Soomfon SE physical controls.
+> - **UI** — click-to-assign actions.
+> - **Build** — release builds kept warning-free.
+>
+> See the `opendeck-hardening-20260804` branch commit history for details.
 
 OpenDeck is a desktop application for using stream controller devices like the Elgato Stream Deck on Linux, Windows, and macOS. OpenDeck supports plugins made for the original Stream Deck SDK, allowing many plugins made for the Elgato software ecosystem to be used, or the [OpenAction](https://openaction.amankhanna.me/) API.
 
