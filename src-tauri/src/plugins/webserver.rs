@@ -30,6 +30,31 @@ fn property_inspector_parent_origins(include_development: bool) -> String {
 	serde_json::to_string(&origins).expect("static property inspector origins must serialize")
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AssetPathError {
+	NotFound,
+	OutsideRoot,
+}
+
+fn confine_asset_path(prefix: &Path, path: PathBuf) -> Result<PathBuf, AssetPathError> {
+	if !path.starts_with(prefix) {
+		return Err(AssetPathError::OutsideRoot);
+	}
+	Ok(path)
+}
+
+fn resolve_asset_path(prefix: &Path, request_path: &str) -> Result<PathBuf, AssetPathError> {
+	let requested_path = Path::new(request_path);
+	if requested_path.is_absolute() {
+		if let Ok(path) = requested_path.canonicalize() {
+			return confine_asset_path(prefix, path);
+		}
+	}
+
+	let path = prefix.join(request_path.trim_start_matches(['/', '\\'])).canonicalize().map_err(|_| AssetPathError::NotFound)?;
+	confine_asset_path(prefix, path)
+}
+
 /// Start a simple webserver to serve files of plugins that run in a browser environment.
 pub async fn init_webserver(prefix: PathBuf) {
 	let Ok(prefix) = prefix.canonicalize() else {
@@ -64,19 +89,18 @@ pub async fn init_webserver(prefix: PathBuf) {
 		let is_property_inspector = url.ends_with("|opendeck_property_inspector");
 		let is_property_inspector_child = url.ends_with("|opendeck_property_inspector_child");
 		let requested_path = url.trim_end_matches("|opendeck_property_inspector").trim_end_matches("|opendeck_property_inspector_child");
-		let path = match Path::new(requested_path).canonicalize() {
+		// Plugin assets are always confined to the canonical plugin directory, including in developer mode.
+		let path = match resolve_asset_path(&prefix, requested_path) {
 			Ok(path) => path,
-			Err(_) => {
+			Err(AssetPathError::NotFound) => {
 				let _ = request.respond(Response::empty(404));
 				continue;
 			}
+			Err(AssetPathError::OutsideRoot) => {
+				let _ = request.respond(Response::empty(403));
+				continue;
+			}
 		};
-
-		// Plugin assets are always confined to the canonical plugin directory, including in developer mode.
-		if !path.starts_with(&prefix) {
-			let _ = request.respond(Response::empty(403));
-			continue;
-		}
 
 		let cors_origin = request.headers().iter().find(|header| header.field.equiv("Origin")).and_then(|header| {
 			let origin = header.value.to_string();
@@ -273,7 +297,31 @@ pub async fn init_webserver(prefix: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-	use super::{asset_origin_allowed, property_inspector_parent_origins};
+	use std::path::{Path, PathBuf};
+
+	use super::{AssetPathError, asset_origin_allowed, property_inspector_parent_origins, resolve_asset_path};
+
+	fn plugin_root() -> PathBuf {
+		Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().unwrap()
+	}
+
+	#[cfg(unix)]
+	struct Scratch(PathBuf);
+
+	#[cfg(unix)]
+	impl Drop for Scratch {
+		fn drop(&mut self) {
+			let _ = std::fs::remove_dir_all(&self.0);
+		}
+	}
+
+	#[cfg(unix)]
+	fn scratch() -> Scratch {
+		use std::time::{SystemTime, UNIX_EPOCH};
+
+		let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+		Scratch(std::env::temp_dir().join(format!("opendeck-webserver-test-{}-{nonce}", std::process::id())))
+	}
 
 	#[test]
 	fn cors_allows_only_application_and_plugin_server_origins() {
@@ -282,6 +330,80 @@ mod tests {
 		assert!(asset_origin_allowed("http://localhost:57118", 57116));
 		assert!(!asset_origin_allowed("https://attacker.invalid", 57116));
 		assert!(!asset_origin_allowed("http://localhost.attacker.invalid:57118", 57116));
+	}
+
+	#[test]
+	fn absolute_looking_asset_urls_resolve_beneath_plugin_root() {
+		let prefix = plugin_root();
+		let expected = prefix.join("src/plugins/webserver.rs").canonicalize().unwrap();
+		assert_eq!(resolve_asset_path(&prefix, "/src/plugins/webserver.rs"), Ok(expected));
+	}
+
+	#[test]
+	fn absolute_filesystem_asset_paths_within_plugin_root_are_preserved() {
+		let prefix = plugin_root();
+		let expected = prefix.join("src/plugins/webserver.rs").canonicalize().unwrap();
+		assert_eq!(resolve_asset_path(&prefix, expected.to_str().unwrap()), Ok(expected));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn renderer_prefixed_absolute_filesystem_paths_are_preserved() {
+		let prefix = plugin_root();
+		let expected = prefix.join("src/plugins/webserver.rs").canonicalize().unwrap();
+		let request_path = format!("/{}", expected.display());
+		assert_eq!(resolve_asset_path(&prefix, &request_path), Ok(expected));
+	}
+
+	#[test]
+	fn traversal_paths_are_rejected_after_url_decoding() {
+		let prefix = plugin_root();
+		let decoded = urlencoding::decode("/%2e%2e/package.json").unwrap();
+		assert_eq!(resolve_asset_path(&prefix, &decoded), Err(AssetPathError::OutsideRoot));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn existing_absolute_paths_outside_root_cannot_use_relative_fallback() {
+		use std::fs;
+
+		let scratch = scratch();
+		let root = scratch.0.join("root");
+		let outside = scratch.0.join("outside/icon.svg");
+		fs::create_dir_all(&root).unwrap();
+		fs::create_dir_all(outside.parent().unwrap()).unwrap();
+		fs::write(&outside, b"outside").unwrap();
+
+		let fallback = root.join(outside.to_string_lossy().trim_start_matches('/'));
+		fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+		fs::write(&fallback, b"fallback").unwrap();
+
+		let prefix = root.canonicalize().unwrap();
+		let request_path = outside.canonicalize().unwrap();
+		assert_eq!(resolve_asset_path(&prefix, request_path.to_str().unwrap()), Err(AssetPathError::OutsideRoot));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlinks_cannot_escape_plugin_root() {
+		use std::{fs, os::unix::fs::symlink};
+
+		let scratch = scratch();
+		fs::create_dir_all(scratch.0.join("root")).unwrap();
+		fs::create_dir_all(scratch.0.join("outside")).unwrap();
+		fs::write(scratch.0.join("outside/secret"), b"secret").unwrap();
+		symlink(scratch.0.join("outside"), scratch.0.join("root/escape")).unwrap();
+
+		let prefix = scratch.0.join("root").canonicalize().unwrap();
+		assert_eq!(resolve_asset_path(&prefix, "/escape/secret"), Err(AssetPathError::OutsideRoot));
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn windows_asset_urls_resolve_beneath_plugin_root() {
+		let prefix = plugin_root();
+		let expected = prefix.join("src\\plugins\\webserver.rs").canonicalize().unwrap();
+		assert_eq!(resolve_asset_path(&prefix, "\\src\\plugins\\webserver.rs"), Ok(expected));
 	}
 
 	#[test]
