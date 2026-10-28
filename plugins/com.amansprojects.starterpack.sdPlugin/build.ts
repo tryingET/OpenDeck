@@ -9,27 +9,20 @@ const outDir = Deno.args[0];
 const target = Deno.args[1];
 
 try {
-  await Deno.remove(outDir, { recursive: true });
+	await Deno.remove(outDir, { recursive: true });
 } catch (error: any) {
-  if (!(error instanceof Deno.errors.NotFound)) {
-    throw error;
-  }
+	if (!(error instanceof Deno.errors.NotFound)) {
+		throw error;
+	}
 }
 
 await copy("assets", outDir);
 if (
-  !(await new Deno.Command("cargo", {
-    args: [
-      "install",
-      "--locked",
-      "--path",
-      ".",
-      "--target",
-      target,
-      "--root",
-      join(outDir, target),
-    ],
-  }).spawn().status).success
+	!(
+		await new Deno.Command("cargo", {
+			args: ["install", "--locked", "--path", ".", "--target", target, "--root", join(outDir, target)],
+		}).spawn().status
+	).success
 ) {
-  Deno.exit(1);
+	Deno.exit(1);
 }

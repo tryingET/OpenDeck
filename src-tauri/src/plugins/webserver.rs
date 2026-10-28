@@ -45,10 +45,10 @@ fn confine_asset_path(prefix: &Path, path: PathBuf) -> Result<PathBuf, AssetPath
 
 fn resolve_asset_path(prefix: &Path, request_path: &str) -> Result<PathBuf, AssetPathError> {
 	let requested_path = Path::new(request_path);
-	if requested_path.is_absolute() {
-		if let Ok(path) = requested_path.canonicalize() {
-			return confine_asset_path(prefix, path);
-		}
+	if requested_path.is_absolute()
+		&& let Ok(path) = requested_path.canonicalize()
+	{
+		return confine_asset_path(prefix, path);
 	}
 
 	let path = prefix.join(request_path.trim_start_matches(['/', '\\'])).canonicalize().map_err(|_| AssetPathError::NotFound)?;
